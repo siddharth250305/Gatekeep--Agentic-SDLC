@@ -1,0 +1,10 @@
+.env
+*.env
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.gstack/
+agents/workspaces/

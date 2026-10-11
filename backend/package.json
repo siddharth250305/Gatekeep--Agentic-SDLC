@@ -1,0 +1,21 @@
+{
+  "name": "gatekeep-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GateKeep API - tamper-evident per-run SHA-256 audit chain",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed-cli.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.5"
+  }
+}

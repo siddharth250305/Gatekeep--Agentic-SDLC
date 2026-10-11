@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gatekeep
+      POSTGRES_PASSWORD: gatekeep
+      POSTGRES_DB: gatekeep
+    ports:
+      - "5432:5432"
+    volumes:
+      - gatekeep_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gatekeep"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  gatekeep_pgdata:

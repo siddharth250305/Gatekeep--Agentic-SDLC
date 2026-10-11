@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "gatekeep": {
+      "command": "/Users/adeshsiddharth123/gatekeeper/agents/.venv/bin/python",
+      "args": [
+        "/Users/adeshsiddharth123/gatekeeper/agents/app/mcp/server.py",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "/Users/adeshsiddharth123/gatekeeper/agents",
+      "env": {
+        "PYTHONPATH": "/Users/adeshsiddharth123/gatekeeper/agents",
+        "GATEKEEP_API": "http://localhost:4000"
+      }
+    }
+  }
+}
