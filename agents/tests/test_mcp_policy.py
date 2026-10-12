@@ -121,3 +121,35 @@ def test_skip_transition_blocked():
     result = engine.check_phase_transition("req", "design")
     assert result.allowed is False
     assert "skip phases" in result.reason.lower()
+
+def test_get_phase_permissions_for_req_and_code():
+    """Verify get_phase_permissions accurately partitions allowed and denied tools per phase."""
+    engine = PolicyEngine()
+    
+    req_perms = engine.get_phase_permissions("req")
+    assert "submit_requirements" in req_perms["allowed_tools"]
+    assert "apply_patch" in req_perms["denied_tools"]
+    assert "run_tests" in req_perms["denied_tools"]
+    
+    code_perms = engine.get_phase_permissions("code")
+    assert "apply_patch" in code_perms["allowed_tools"]
+    assert "run_tests" in code_perms["allowed_tools"]
+    assert "submit_requirements" in code_perms["denied_tools"]
+
+def test_get_phase_permissions_invalid_phase():
+    """Verify get_phase_permissions raises ValueError on invalid phase."""
+    engine = PolicyEngine()
+    with pytest.raises(ValueError, match="Unknown phase"):
+        engine.get_phase_permissions("unknown_phase")
+
+def test_get_policy_manifest_completeness():
+    """Verify get_policy_manifest exports full deterministic policy rules."""
+    engine = PolicyEngine()
+    manifest = engine.get_policy_manifest()
+    
+    assert manifest["valid_phases"] == ["req", "g1", "design", "g2", "code", "out"]
+    assert ".env" in manifest["blocked_file_patterns"]
+    assert "apply_patch" in manifest["tool_permissions"]
+    assert manifest["enforces_path_traversal_guard"] is True
+    assert manifest["enforces_sequential_transitions"] is True
+
