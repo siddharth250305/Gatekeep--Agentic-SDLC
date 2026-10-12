@@ -145,13 +145,4 @@ class PolicyEngine:
             "blocked_patterns": list(self.BLOCKED_FILE_PATTERNS),
         }
 
-    def get_policy_manifest(self) -> dict[str, object]:
-        """Return the complete deterministic policy matrix for audit verification."""
-        return {
-            "valid_phases": list(self.VALID_PHASES),
-            "blocked_file_patterns": list(self.BLOCKED_FILE_PATTERNS),
-            "tool_permissions": {k: list(v) for k, v in self.TOOL_PERMISSIONS.items()},
-            "enforces_path_traversal_guard": True,
-            "enforces_sequential_transitions": True,
-        }
 

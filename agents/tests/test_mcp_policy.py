@@ -142,14 +142,4 @@ def test_get_phase_permissions_invalid_phase():
     with pytest.raises(ValueError, match="Unknown phase"):
         engine.get_phase_permissions("unknown_phase")
 
-def test_get_policy_manifest_completeness():
-    """Verify get_policy_manifest exports full deterministic policy rules."""
-    engine = PolicyEngine()
-    manifest = engine.get_policy_manifest()
-    
-    assert manifest["valid_phases"] == ["req", "g1", "design", "g2", "code", "out"]
-    assert ".env" in manifest["blocked_file_patterns"]
-    assert "apply_patch" in manifest["tool_permissions"]
-    assert manifest["enforces_path_traversal_guard"] is True
-    assert manifest["enforces_sequential_transitions"] is True
 

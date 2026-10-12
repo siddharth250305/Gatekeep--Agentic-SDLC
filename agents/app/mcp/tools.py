@@ -16,6 +16,7 @@ import httpx
 from ..repository.context import build_context
 from ..repository.tools import WorkspaceTools
 from ..sandbox import SandboxRunner
+from .policy import PolicyEngine
 from .session import McpSession, SessionManager
 
 # Absolute root for workspaces so paths resolve correctly regardless of cwd.
@@ -27,6 +28,7 @@ class GateKeepTools:
 
     def __init__(self, session_manager: SessionManager, base_url: str | None = None):
         self.session_manager = session_manager
+        self.policy = PolicyEngine()
         self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4000")
 
     # ── helpers ──────────────────────────────────────────────────────────
@@ -123,6 +125,8 @@ class GateKeepTools:
                 active_phase = step.get("key", "req")
                 break
 
+        phase_perms = self.policy.get_phase_permissions(active_phase)
+
         return {
             "run_id": run.get("id"),
             "status": run.get("status"),
@@ -135,6 +139,8 @@ class GateKeepTools:
             "requirements": run.get("requirements"),
             "design": run.get("design"),
             "tests": run.get("tests"),
+            "allowed_tools": phase_perms["allowed_tools"],
+            "denied_tools": phase_perms["denied_tools"],
             "restrictions": [
                 "Do not modify .env or secret files",
                 "All code changes must go through apply_patch or write_file",
