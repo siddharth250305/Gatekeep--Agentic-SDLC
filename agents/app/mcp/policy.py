@@ -126,3 +126,32 @@ class PolicyEngine:
             f"Cannot skip phases: '{current_phase}' → '{target_phase}'. "
             f"Next phase must be '{self.VALID_PHASES[cur_idx + 1]}'",
         )
+
+    def get_phase_permissions(self, phase: str) -> dict[str, list[str]]:
+        """Return allowed and denied tools for the specified pipeline phase."""
+        if phase not in self.VALID_PHASES:
+            raise ValueError(f"Unknown phase '{phase}'. Valid phases: {self.VALID_PHASES}")
+
+        allowed = sorted(
+            tool for tool, phases in self.TOOL_PERMISSIONS.items() if phase in phases
+        )
+        denied = sorted(
+            tool for tool, phases in self.TOOL_PERMISSIONS.items() if phase not in phases
+        )
+        return {
+            "phase": [phase],
+            "allowed_tools": allowed,
+            "denied_tools": denied,
+            "blocked_patterns": list(self.BLOCKED_FILE_PATTERNS),
+        }
+
+    def get_policy_manifest(self) -> dict[str, object]:
+        """Return the complete deterministic policy matrix for audit verification."""
+        return {
+            "valid_phases": list(self.VALID_PHASES),
+            "blocked_file_patterns": list(self.BLOCKED_FILE_PATTERNS),
+            "tool_permissions": {k: list(v) for k, v in self.TOOL_PERMISSIONS.items()},
+            "enforces_path_traversal_guard": True,
+            "enforces_sequential_transitions": True,
+        }
+
