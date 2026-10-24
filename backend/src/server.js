@@ -30,7 +30,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => clients.delete(ws))
 })
 
-const port = process.env.PORT || 4000
+const port = process.env.PORT || 4040
 server.listen(port, () => {
   console.log(`GateKeep API + WebSocket on http://localhost:${port}`)
 })

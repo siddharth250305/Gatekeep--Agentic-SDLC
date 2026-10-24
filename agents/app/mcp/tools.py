@@ -7,6 +7,7 @@ State-mutating operations are audit-logged through the backend."""
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import httpx
 
 from ..repository.context import build_context
+from ..repository.security import is_sensitive_path
 from ..repository.tools import WorkspaceTools
 from ..sandbox import SandboxRunner
 from .policy import PolicyEngine
@@ -22,6 +24,78 @@ from .session import McpSession, SessionManager
 # Absolute root for workspaces so paths resolve correctly regardless of cwd.
 _WORKSPACES = Path(__file__).resolve().parent.parent.parent / "workspaces"
 
+# Build output that never belongs in a review diff.
+_DIFF_SKIP = ("__pycache__/", ".pytest_cache/")
+# Per-file cap on diff lines sent to the dashboard.
+_MAX_DIFF_LINES = 3000
+
+
+def workspace_diff(workspace: str) -> str:
+    """`git diff HEAD` plus every new untracked file, so reviewers see all changes."""
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        return ""
+
+    def git(*args: str) -> str:
+        proc = subprocess.run(["git", *args], cwd=workspace, capture_output=True, text=True, timeout=15)
+        return proc.stdout
+
+    parts = [git("diff", "HEAD")]
+    untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    for path in sorted(p for p in untracked if p):
+        if any(skip in path for skip in _DIFF_SKIP) or is_sensitive_path(path):
+            continue
+        # --no-index exits 1 when the files differ, which is always the case here.
+        parts.append(git("diff", "--no-index", "--", "/dev/null", path))
+    return "".join(parts)
+
+
+def diff_artifacts(diff_text: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Split a unified diff into the dashboard's `files` list and `diff` object."""
+    by_file: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    old_n = new_n = 0
+    in_hunk = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            path = line.split(" b/", 1)[-1]
+            current = by_file[path] = {"file": path, "status": "M", "add": 0, "rem": 0, "lines": []}
+            in_hunk = False
+            continue
+        if current is None:
+            continue
+        if not in_hunk:
+            if line.startswith("new file mode"):
+                current["status"] = "A"
+            elif line.startswith("deleted file mode"):
+                current["status"] = "D"
+        if line.startswith("@@"):
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line)
+            old_n, new_n = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+            in_hunk = True
+            continue
+        if not in_hunk or line.startswith("\\"):
+            continue
+        if line.startswith("+"):
+            current["add"] += 1
+            entry = {"n1": None, "n2": new_n, "type": "add", "text": line[1:]}
+            new_n += 1
+        elif line.startswith("-"):
+            current["rem"] += 1
+            entry = {"n1": old_n, "n2": None, "type": "rem", "text": line[1:]}
+            old_n += 1
+        else:
+            entry = {"n1": old_n, "n2": new_n, "type": "ctx", "text": line[1:]}
+            old_n += 1
+            new_n += 1
+        if len(current["lines"]) < _MAX_DIFF_LINES:
+            current["lines"].append(entry)
+
+    if not by_file:
+        return [], None
+    files = [{"path": p, "status": f["status"], "add": f["add"], "rem": f["rem"]} for p, f in by_file.items()]
+    first = next(iter(by_file.values()))
+    return files, {**first, "by_file": by_file}
+
 
 class GateKeepTools:
     """Wraps core GateKeep capabilities behind session-aware, audit-traced methods."""
@@ -29,7 +103,7 @@ class GateKeepTools:
     def __init__(self, session_manager: SessionManager, base_url: str | None = None):
         self.session_manager = session_manager
         self.policy = PolicyEngine()
-        self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4000")
+        self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4040")
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -269,20 +343,10 @@ class GateKeepTools:
         return result
 
     def get_diff(self, session_id: str) -> str:
-        """Get `git diff HEAD` for the workspace."""
+        """Get `git diff HEAD` for the workspace, including new untracked files."""
         session = self._get_session(session_id)
-        workspace = self._workspace_path(session)
-
-        if not os.path.isdir(os.path.join(workspace, ".git")):
-            return ""
-
         try:
-            proc = subprocess.run(
-                ["git", "diff", "HEAD"],
-                cwd=workspace,
-                capture_output=True, text=True, timeout=15,
-            )
-            return proc.stdout
+            return workspace_diff(self._workspace_path(session))
         except Exception:
             return ""
 
@@ -336,10 +400,33 @@ class GateKeepTools:
         if run.get("status") == "awaiting_gate":
             return {"already_awaiting": True, "gate": run.get("gate")}
 
-        # Store a summary artifact so the reviewer sees context
-        self._backend_put(f"runs/{session.run_id}/artifacts", {"summary": summary})
+        # Store the summary and the full diff so the reviewer sees the actual changes.
+        try:
+            files, diff = diff_artifacts(workspace_diff(self._workspace_path(session)))
+        except Exception as exc:
+            print(f"[mcp] diff warning: {exc}")
+            files, diff = [], None
+        tests = run.get("tests") or {}
+        checks = [f"{len(files)} file(s) changed: +{sum(f['add'] for f in files)} / -{sum(f['rem'] for f in files)}"]
+        if tests.get("total"):
+            checks.append(f"{tests.get('passed', 0)}/{tests['total']} tests passed in the sandbox")
+        artifacts: dict[str, Any] = {
+            "summary": {
+                "headline": "Ready for your review",
+                "sub": summary.strip().split("\n\n", 1)[0][:400],
+                "checks": checks,
+                "details": summary,
+            },
+        }
+        if diff is not None:
+            artifacts["files"] = files
+            artifacts["diff"] = diff
+        self._backend_put(f"runs/{session.run_id}/artifacts", artifacts)
 
-        self._audit(session.run_id, "mcp.approval.requested", {"summary": summary[:500]})
+        self._audit(session.run_id, "mcp.approval.requested", {
+            "summary": summary[:500],
+            "files": [f["path"] for f in files],
+        })
 
         return {
             "requested": True,

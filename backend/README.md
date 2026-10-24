@@ -21,7 +21,7 @@ per-run SHA-256 audit chain** with a verification endpoint. Every later phase
 docker compose up -d db          # Postgres on :5432
 cp .env.example .env
 npm install
-npm start                        # API on :4000 (creates the table on boot)
+npm start                        # API on :4040 (creates the table on boot)
 ```
 
 ## Test
@@ -58,18 +58,18 @@ Seed the 3 demo runs (RUN-0427/0426/0425) with real chains: `npm run seed`.
 
 ```bash
 R=RUN-0427
-curl -s -XPOST localhost:4000/runs/$R/audit -H 'content-type: application/json' \
+curl -s -XPOST localhost:4040/runs/$R/audit -H 'content-type: application/json' \
   -d '{"event":"run.created","actor":"ml-priya"}'
-curl -s -XPOST localhost:4000/runs/$R/audit -H 'content-type: application/json' \
+curl -s -XPOST localhost:4040/runs/$R/audit -H 'content-type: application/json' \
   -d '{"event":"design.approved","actor":"o-lindqvist","payload":{"file":"throttle.py"}}'
 
-curl -s -XPOST localhost:4000/runs/$R/audit/verify        # { "valid": true, "length": 2 }
+curl -s -XPOST localhost:4040/runs/$R/audit/verify        # { "valid": true, "length": 2 }
 
 # Real database mutation of the approved event's payload:
-curl -s -XPOST localhost:4000/runs/$R/audit/2/tamper -H 'content-type: application/json' \
+curl -s -XPOST localhost:4040/runs/$R/audit/2/tamper -H 'content-type: application/json' \
   -d '{"payload":{"file":"backdoor.py"}}'
 
-curl -s -XPOST localhost:4000/runs/$R/audit/verify
+curl -s -XPOST localhost:4040/runs/$R/audit/verify
 # { "valid": false, "brokenAt": 2, "reason": "hash_mismatch",
 #   "recomputedHash": "…", "storedHash": "…" }
 ```

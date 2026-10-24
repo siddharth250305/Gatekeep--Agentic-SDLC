@@ -16,17 +16,17 @@ function highlight(code) {
   const out = []; let prev = null; let i = 0; TOKEN.lastIndex = 0; let m
   while ((m = TOKEN.exec(code)) !== null) {
     const [full,,str,num,ident,ws] = m
-    let cls = 'text-ink'
-    if (m[1]) cls = 'text-[#86868b] italic'
-    else if (str) cls = 'text-[#1f7a37] font-medium'
-    else if (num) cls = 'text-[#b25000]'
+    let cls = 'text-ink dark:text-[#f5f5f7]'
+    if (m[1]) cls = 'text-faint dark:text-[#8e8e93] italic'
+    else if (str) cls = 'text-[#17692e] dark:text-[#34c759] font-medium'
+    else if (num) cls = 'text-[#8f4700] dark:text-[#ff9f0a]'
     else if (ident) {
-      if (KEYWORDS.has(ident)) cls = 'text-accent font-semibold'
-      else if (ident === 'self') cls = 'text-[#d70015] font-medium'
-      else if (CONSTS.has(ident)) cls = 'text-[#b25000] font-semibold'
-      else if (TYPES.has(ident)) cls = 'text-accent'
-      else if (prev === 'def' || prev === 'function' || prev === 'class') cls = 'text-ink font-semibold'
-    } else if (!ws) cls = 'text-muted'
+      if (KEYWORDS.has(ident)) cls = 'text-accent dark:text-[#4da3ff] font-semibold'
+      else if (ident === 'self') cls = 'text-[#d70015] dark:text-[#ff453a] font-medium'
+      else if (CONSTS.has(ident)) cls = 'text-[#8f4700] dark:text-[#ff9f0a] font-semibold'
+      else if (TYPES.has(ident)) cls = 'text-accent dark:text-[#4da3ff]'
+      else if (prev === 'def' || prev === 'function' || prev === 'class') cls = 'text-ink dark:text-[#f5f5f7] font-semibold'
+    } else if (!ws) cls = 'text-muted dark:text-[#a1a1aa]'
     if (ident) prev = ident; else if (!ws) prev = null
     out.push(<span key={i++} className={cls}>{full}</span>)
   }
@@ -303,6 +303,75 @@ const CODEBASE_FILES = {
   },
 }
 
+// =========================================================================
+// RUN DIFF NORMALIZATION
+// run.diff arrives in three shapes: the GateKeep object ({file, lines, by_file}),
+// raw unified-diff text, or an array of per-file entries. All become
+// { files: [{path, status, add, rem}], linesByFile: {path: diffLines} }.
+// =========================================================================
+const DEMO_TABS = ['src/checkout/webhook.py', 'tests/test_webhook.py', 'config/settings.py', 'src/middleware/throttle.py']
+
+function parseUnifiedDiff(text) {
+  const byFile = {}
+  let cur = null
+  let oldN = 0
+  let newN = 0
+  let inHunk = false
+  for (const line of String(text).replace(/\n$/, '').split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      const path = line.split(' b/').slice(1).join(' b/')
+      cur = byFile[path] = { path, status: 'M', add: 0, rem: 0, lines: [] }
+      inHunk = false
+      continue
+    }
+    if (!cur && line.startsWith('+++ ')) {
+      // Plain `diff -u` output without a "diff --git" header.
+      const path = line.slice(4).replace(/^b\//, '').split('\t')[0]
+      cur = byFile[path] = { path, status: 'M', add: 0, rem: 0, lines: [] }
+      continue
+    }
+    if (!cur) continue
+    if (!inHunk) {
+      if (line.startsWith('new file mode')) cur.status = 'A'
+      else if (line.startsWith('deleted file mode')) cur.status = 'D'
+    }
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/)
+    if (hunk) { oldN = +hunk[1]; newN = +hunk[2]; inHunk = true; continue }
+    if (!inHunk || line.startsWith('\\')) continue
+    if (line.startsWith('+')) { cur.add++; cur.lines.push({ n1: null, n2: newN++, type: 'add', text: line.slice(1) }) }
+    else if (line.startsWith('-')) { cur.rem++; cur.lines.push({ n1: oldN++, n2: null, type: 'rem', text: line.slice(1) }) }
+    else cur.lines.push({ n1: oldN++, n2: newN++, type: 'ctx', text: line.slice(1) })
+  }
+  return Object.values(byFile)
+}
+
+function normalizeRunDiff(run) {
+  const linesByFile = {}
+  const derived = []
+  const diff = run?.diff
+  const addEntry = (entry) => {
+    const path = entry.path || entry.file
+    if (!path) return
+    const parsed = typeof entry.diff === 'string' ? parseUnifiedDiff(entry.diff)[0] : null
+    const lines = entry.lines || parsed?.lines || []
+    linesByFile[path] = lines
+    derived.push({
+      path,
+      status: entry.status || parsed?.status || 'M',
+      add: entry.add ?? parsed?.add ?? lines.filter((l) => l.type === 'add').length,
+      rem: entry.rem ?? parsed?.rem ?? lines.filter((l) => l.type === 'rem').length,
+    })
+  }
+  if (typeof diff === 'string') parseUnifiedDiff(diff).forEach(addEntry)
+  else if (Array.isArray(diff)) diff.forEach(addEntry)
+  else if (diff && typeof diff === 'object') {
+    if (diff.by_file) Object.entries(diff.by_file).forEach(([path, entry]) => addEntry({ ...entry, path }))
+    else addEntry(diff)
+  }
+  const files = run?.files?.length ? run.files : derived
+  return { files, linesByFile }
+}
+
 export default function CodeReview({
   run,
   reviewerRole = 'Engineer',
@@ -316,15 +385,14 @@ export default function CodeReview({
   const [copied, setCopied] = useState(false)
   const [fullFileModal, setFullFileModal] = useState(false)
   const [viewMode, setViewMode] = useState('unified') // 'unified' | 'split'
-  const [selectedFilePath, setSelectedFilePath] = useState('src/checkout/webhook.py')
-  
+  const runDiff = useMemo(() => normalizeRunDiff(run), [run])
+  const realFiles = runDiff.files
+  const hasRealFiles = realFiles.length > 0
+
+  const [selectedFilePath, setSelectedFilePath] = useState(() => (hasRealFiles ? realFiles[0].path : DEMO_TABS[0]))
+
   // IDE Open Tabs across the codebase
-  const [openTabs, setOpenTabs] = useState([
-    'src/checkout/webhook.py',
-    'tests/test_webhook.py',
-    'config/settings.py',
-    'src/middleware/throttle.py',
-  ])
+  const [openTabs, setOpenTabs] = useState(() => (hasRealFiles ? realFiles.slice(0, 4).map((f) => f.path) : DEMO_TABS))
 
   // Quick Open Modal (⌘P)
   const [quickOpenOpen, setQuickOpenOpen] = useState(false)
@@ -340,9 +408,18 @@ export default function CodeReview({
 
   // Explorer search & folder expansion
   const [explorerFilter, setExplorerFilter] = useState('')
-  const [expandedFolders, setExpandedFolders] = useState(
-    new Set(['src', 'src/checkout', 'src/middleware', 'src/deps', 'tests', 'config'])
-  )
+  const [expandedFolders, setExpandedFolders] = useState(() => {
+    const defaultFolders = new Set(['src', 'src/checkout', 'src/middleware', 'src/deps', 'tests', 'config'])
+    if (hasRealFiles) {
+      realFiles.forEach((f) => {
+        const parts = f.path.split('/')
+        for (let i = 1; i < parts.length; i++) {
+          defaultFolders.add(parts.slice(0, i).join('/'))
+        }
+      })
+    }
+    return defaultFolders
+  })
 
   // Keyboard shortcut for Quick Open (⌘P or Ctrl+P)
   useEffect(() => {
@@ -366,35 +443,68 @@ export default function CodeReview({
     return () => window.removeEventListener('click', closeMenu)
   }, [])
 
-  // Codebase files merged with backend files if present
+  // A run with recorded files shows only those files; the demo codebase is for runs without any.
   const allCodebaseFiles = useMemo(() => {
-    const registry = { ...CODEBASE_FILES }
-    if (run?.files && run.files.length > 0) {
-      run.files.forEach((rf) => {
-        if (!registry[rf.path]) {
-          registry[rf.path] = {
-            path: rf.path,
-            name: rf.path.split('/').pop(),
-            folder: rf.path.split('/').slice(0, -1).join('/'),
-            modified: true,
-            status: 'M',
-            add: rf.add || 0,
-            rem: rf.rem || 0,
-            header: '@@ -1,10 +1,10 @@',
-            diffLines: (run.diff?.lines && run.diff.file === rf.path) ? run.diff.lines : [
-              { n1: 1, n2: 1, type: 'ctx', text: `# Source file: ${rf.path}` },
-              { n1: 2, n2: 2, type: 'ctx', text: '# Generated by GateKeep agent' },
-            ],
-          }
+    if (!hasRealFiles) return { ...CODEBASE_FILES }
+    const registry = {}
+    realFiles.forEach((rf) => {
+      const lines = runDiff.linesByFile[rf.path]
+      registry[rf.path] = {
+        path: rf.path,
+        name: rf.path.split('/').pop(),
+        folder: rf.path.split('/').slice(0, -1).join('/'),
+        modified: true,
+        status: rf.status || 'M',
+        add: rf.add || 0,
+        rem: rf.rem || 0,
+        header: rf.status === 'A' ? 'new file' : null,
+        diffLines: lines?.length ? lines : [{ n1: null, n2: null, type: 'ctx', text: 'No diff recorded for this file.' }],
+      }
+    })
+    return registry
+  }, [realFiles, runDiff, hasRealFiles])
+
+  // Open the run's own files when switching to a run that has them.
+  useEffect(() => {
+    if (!hasRealFiles) {
+      setSelectedFilePath(DEMO_TABS[0])
+      setOpenTabs(DEMO_TABS)
+      return
+    }
+    const paths = realFiles.map((f) => f.path)
+    setSelectedFilePath((prev) => (paths.includes(prev) ? prev : paths[0]))
+    setOpenTabs((prev) => {
+      const filtered = prev.filter((p) => paths.includes(p))
+      return filtered.length > 0 ? filtered : paths.slice(0, 4)
+    })
+    setExpandedFolders((prev) => {
+      const next = new Set(prev)
+      paths.forEach((p) => {
+        const parts = p.split('/')
+        for (let i = 1; i < parts.length; i++) {
+          next.add(parts.slice(0, i).join('/'))
         }
       })
-    }
-    return registry
-  }, [run])
+      return next
+    })
+  }, [run?.id, hasRealFiles]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Real files grouped by folder for the explorer.
+  const realFolders = useMemo(() => {
+    const groups = {}
+    Object.values(allCodebaseFiles).forEach((f) => { (groups[f.folder] ||= []).push(f) })
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
+  }, [allCodebaseFiles])
 
   const fileList = useMemo(() => Object.values(allCodebaseFiles), [allCodebaseFiles])
   const modifiedFiles = useMemo(() => fileList.filter((f) => f.modified), [fileList])
-  const activeFile = allCodebaseFiles[selectedFilePath] || allCodebaseFiles['src/checkout/webhook.py']
+  const activeFile = allCodebaseFiles[selectedFilePath] || fileList[0] || {
+    path: '',
+    name: '',
+    folder: '',
+    status: 'clean',
+    diffLines: [],
+  }
   const diffLines = activeFile.diffLines || []
 
   const totalAdd = modifiedFiles.reduce((acc, f) => acc + (f.add || 0), 0)
@@ -488,75 +598,72 @@ export default function CodeReview({
   }, [fileList, quickSearch])
 
   // Breadcrumb path components
-  const pathParts = activeFile.path.split('/')
-  const fileName = pathParts.pop()
+  const pathParts = (activeFile.path || '').split('/')
+  const fileName = pathParts.pop() || ''
   const folderParts = pathParts
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden select-none bg-white font-sans">
-      {/* ========================================================================= */}
-      {/* 1. IDE CODEBASE HEADER BAR (42px) — Shows the Whole Codebase as an IDE   */}
-      {/* ========================================================================= */}
+    <div className="flex h-full w-full flex-col overflow-hidden select-none bg-white font-sans dark:bg-[#000000]">
       {/* ========================================================================= */}
       {/* 1. IDE CODEBASE HEADER BAR (40px) — Collision-Proof Responsive Header    */}
       {/* ========================================================================= */}
-      <div className="flex h-[40px] shrink-0 items-center justify-between border-b border-black/[0.08] bg-[#fbfbfd] px-3.5 select-none z-20 gap-3">
+      <div className="flex h-[40px] shrink-0 items-center justify-between border-b border-black/[0.08] bg-[#fbfbfd] surface-ide-bar px-3.5 select-none z-20 gap-3 dark:border-white/[0.08] dark:bg-[#0b0b0d]">
         {/* Left: Interactive Codebase Breadcrumb Path (Auto-shrinks, never overflows) */}
-        <div className="flex items-center gap-1 text-[12px] text-muted min-w-0 flex-1 overflow-hidden">
+        <div className="flex items-center gap-1 text-[12px] text-muted min-w-0 flex-1 overflow-hidden dark:text-[#a1a1aa]">
           {/* Repo selector dropdown */}
           <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
               onClick={() => setActiveDropdown(activeDropdown === 'repo' ? null : 'repo')}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1 font-semibold text-ink hover:bg-black/[0.05] transition-colors"
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1 font-semibold text-ink hover:bg-black/[0.05] transition-colors dark:text-[#f5f5f7] dark:hover:bg-white/[0.08]"
               title="Codebase Repository"
             >
-              <span className="flex h-4 w-4 items-center justify-center rounded bg-black/10 text-ink text-[10px]">
+              <span className="flex h-4 w-4 items-center justify-center rounded bg-black/10 text-ink text-[10px] dark:bg-white/10 dark:text-white">
                 📦
               </span>
               <span className="truncate max-w-[120px]">{run?.repo || 'commerce-core'}</span>
-              <ChevronDown size={11} className="text-faint" />
+              <ChevronDown size={11} className="text-faint dark:text-[#8e8e93]" />
             </button>
             {activeDropdown === 'repo' && (
-              <div className="absolute left-0 top-full mt-1 w-56 rounded-xl border border-black/[0.08] bg-white p-1 shadow-pop z-50 animate-rise text-[12px]">
-                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
+              <div className="absolute left-0 top-full mt-1 w-56 rounded-xl border border-black/[0.08] bg-white p-1 shadow-pop z-50 animate-rise text-[12px] dark:border-white/[0.12] dark:bg-[#18181b]">
+                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint dark:text-[#8e8e93]">
                   Active Codebase
                 </div>
                 <div className="rounded-lg bg-accent/10 px-2.5 py-1.5 font-semibold text-accent flex items-center justify-between">
                   <span>{run?.repo || 'commerce-core'}</span>
                   <Check size={12} />
                 </div>
-                <div className="mt-1 border-t border-black/[0.04] pt-1 text-[11px] text-faint px-2.5 py-1">
-                  Commit: {run?.commit || '9f3c2e1'}
+                <div className="mt-1 border-t border-black/[0.04] pt-1 text-[11px] text-faint px-2.5 py-1 dark:border-white/[0.06] dark:text-[#8e8e93]">
+                  Commit: {run?.commit || (hasRealFiles ? 'not shipped yet' : '9f3c2e1')}
                 </div>
               </div>
             )}
           </div>
 
-          <span className="text-faint shrink-0">/</span>
+          <span className="text-faint shrink-0 dark:text-[#8e8e93]">/</span>
 
           {/* Branch switcher dropdown */}
           <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
               onClick={() => setActiveDropdown(activeDropdown === 'branch' ? null : 'branch')}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-ink font-medium hover:bg-black/[0.05] transition-colors"
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-ink font-medium hover:bg-black/[0.05] transition-colors dark:text-[#f5f5f7] dark:hover:bg-white/[0.08]"
               title="Git Branch"
             >
               <GitBranch size={12} className="text-accent shrink-0" />
-              <span className="truncate max-w-[130px]">{run?.branch || 'feat/webhook-throttle'}</span>
-              <ChevronDown size={11} className="text-faint" />
+              <span className="truncate max-w-[130px]">{run?.branch || (hasRealFiles ? 'main' : 'feat/webhook-throttle')}</span>
+              <ChevronDown size={11} className="text-faint dark:text-[#8e8e93]" />
             </button>
             {activeDropdown === 'branch' && (
-              <div className="absolute left-0 top-full mt-1 w-64 rounded-xl border border-black/[0.08] bg-white p-1 shadow-pop z-50 animate-rise text-[12px]">
-                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
+              <div className="absolute left-0 top-full mt-1 w-64 rounded-xl border border-black/[0.08] bg-white p-1 shadow-pop z-50 animate-rise text-[12px] dark:border-white/[0.12] dark:bg-[#18181b]">
+                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint dark:text-[#8e8e93]">
                   Branches
                 </div>
                 <div className="rounded-lg bg-accent/10 px-2.5 py-1.5 font-semibold text-accent flex items-center justify-between">
-                  <span>{run?.branch || 'feat/webhook-throttle'}</span>
+                  <span>{run?.branch || (hasRealFiles ? 'main' : 'feat/webhook-throttle')}</span>
                   <span className="font-mono text-[10px] text-accent">HEAD</span>
                 </div>
-                <div className="rounded-lg px-2.5 py-1.5 text-muted hover:bg-black/[0.03] transition-colors">
+                <div className="rounded-lg px-2.5 py-1.5 text-muted hover:bg-black/[0.03] transition-colors dark:text-[#a1a1aa] dark:hover:bg-white/[0.05]">
                   <span>main</span>
                 </div>
               </div>
@@ -565,12 +672,12 @@ export default function CodeReview({
 
           {folderParts.map((folder, idx) => (
             <span key={idx} className="hidden sm:flex items-center gap-1 shrink-0">
-              <span className="text-faint">/</span>
-              <span className="rounded px-1.5 py-0.5 text-faint hover:text-ink cursor-pointer">{folder}</span>
+              <span className="text-faint dark:text-[#8e8e93]">/</span>
+              <span className="rounded px-1.5 py-0.5 text-faint hover:text-ink cursor-pointer dark:text-[#8e8e93] dark:hover:text-[#f5f5f7]">{folder}</span>
             </span>
           ))}
 
-          <span className="text-faint shrink-0">/</span>
+          <span className="text-faint shrink-0 dark:text-[#8e8e93]">/</span>
 
           {/* Active File Switcher with Sibling Files */}
           <div className="relative min-w-0 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -583,15 +690,19 @@ export default function CodeReview({
               <File size={12} className="shrink-0" />
               <span className="truncate max-w-[140px]">{fileName}</span>
               {activeFile.modified && (
-                <span className="rounded bg-[#ff9500]/20 px-1 font-mono text-[9.5px] font-bold text-[#b45309] shrink-0">
-                  M
+                <span className={`rounded px-1 font-mono text-[9.5px] font-bold shrink-0 ${
+                  activeFile.status === 'A' ? 'bg-[#34c759]/20 text-[#17692e] dark:text-[#34c759]'
+                    : activeFile.status === 'D' ? 'bg-[#ff3b30]/15 text-[#c4161c] dark:text-[#ff453a]'
+                      : 'bg-[#ff9500]/20 text-[#8f4700] dark:text-[#ff9f0a]'
+                }`}>
+                  {activeFile.status === 'A' || activeFile.status === 'D' ? activeFile.status : 'M'}
                 </span>
               )}
               <ChevronDown size={11} className="text-accent shrink-0" />
             </button>
             {activeDropdown === 'file' && (
-              <div className="absolute left-0 top-full mt-1 w-60 rounded-xl border border-black/[0.08] bg-white p-1 shadow-pop z-50 animate-rise text-[12px]">
-                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
+              <div className="absolute left-0 top-full mt-1 w-60 rounded-xl border border-black/[0.08] bg-white p-1 shadow-pop z-50 animate-rise text-[12px] dark:border-white/[0.12] dark:bg-[#18181b]">
+                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint dark:text-[#8e8e93]">
                   Files in this Folder
                 </div>
                 {fileList
@@ -602,15 +713,15 @@ export default function CodeReview({
                       type="button"
                       onClick={() => { handleOpenFile(f.path); setActiveDropdown(null) }}
                       className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left transition-colors ${
-                        f.path === activeFile.path ? 'bg-accent/10 text-accent font-semibold' : 'text-ink hover:bg-black/[0.04]'
+                        f.path === activeFile.path ? 'bg-accent/10 text-accent font-semibold' : 'text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]'
                       }`}
                     >
                       <div className="flex items-center gap-1.5 truncate">
-                        <File size={12} className={f.path === activeFile.path ? 'text-accent' : 'text-faint'} />
+                        <File size={12} className={f.path === activeFile.path ? 'text-accent' : 'text-faint dark:text-[#8e8e93]'} />
                         <span className="truncate">{f.name}</span>
                       </div>
                       {f.modified && (
-                        <span className="font-mono text-[10px] font-semibold text-[#1f7a37]">
+                        <span className="font-mono text-[10px] font-semibold text-[#17692e] dark:text-[#34c759]">
                           +{f.add} -{f.rem}
                         </span>
                       )}
@@ -625,13 +736,13 @@ export default function CodeReview({
         <button
           type="button"
           onClick={() => setQuickOpenOpen(true)}
-          className="flex h-7 items-center justify-between rounded-xl bg-black/[0.04] px-2.5 text-muted hover:bg-black/[0.07] border border-black/[0.04] text-[12px] transition-colors shrink-0"
+          className="flex h-7 items-center justify-between rounded-xl bg-black/[0.04] px-2.5 text-muted hover:bg-black/[0.07] border border-black/[0.04] text-[12px] transition-colors shrink-0 dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[#a1a1aa] dark:hover:bg-white/[0.1]"
         >
           <div className="flex items-center gap-2">
-            <Search size={12} className="text-faint" />
-            <span className="text-faint hidden lg:inline">Find file in codebase...</span>
+            <Search size={12} className="text-faint dark:text-[#8e8e93]" />
+            <span className="text-faint hidden lg:inline dark:text-[#8e8e93]">Find file in codebase...</span>
           </div>
-          <kbd className="rounded border border-black/[0.08] bg-white px-1.5 py-0.5 font-mono text-[9px] text-[#86868b] shadow-xs ml-2">
+          <kbd className="rounded border border-black/[0.08] bg-white px-1.5 py-0.5 font-mono text-[9px] text-faint shadow-xs ml-2 dark:border-white/[0.12] dark:bg-white/10 dark:text-[#a1a1aa]">
             ⌘P
           </kbd>
         </button>
@@ -639,30 +750,30 @@ export default function CodeReview({
         {/* Right: Codebase Stats & View Actions */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Codebase stats badge */}
-          <div className="hidden 2xl:flex items-center gap-1.5 font-mono text-[11px] text-muted mr-1">
-            <span className="font-semibold text-ink">{modifiedFiles.length} modified</span>
+          <div className="hidden 2xl:flex items-center gap-1.5 font-mono text-[11px] text-muted mr-1 dark:text-[#a1a1aa]">
+            <span className="font-semibold text-ink dark:text-[#f5f5f7]">{modifiedFiles.length} modified</span>
             <span>·</span>
-            <span className="text-[#1f7a37] font-semibold">+{totalAdd}</span>
-            <span className="text-[#d70015] font-semibold">-{totalRem}</span>
+            <span className="text-[#17692e] font-semibold dark:text-[#34c759]">+{totalAdd}</span>
+            <span className="text-[#d70015] font-semibold dark:text-[#ff453a]">-{totalRem}</span>
           </div>
 
           <button
             type="button"
             onClick={handleDownloadPatch}
-            className="flex items-center gap-1 rounded-lg border border-black/[0.08] bg-white hover:bg-black/[0.03] px-2.5 py-1 text-[11px] font-medium text-ink transition-colors shadow-2xs"
+            className="flex items-center gap-1 rounded-lg border border-black/[0.08] bg-white hover:bg-black/[0.03] px-2.5 py-1 text-[11px] font-medium text-ink transition-colors shadow-2xs dark:border-white/[0.1] dark:bg-white/[0.06] dark:text-[#f5f5f7] dark:hover:bg-white/[0.1]"
             title="Download unified diff patch for this run"
           >
-            <Download size={11} className="text-muted" />
+            <Download size={11} className="text-muted dark:text-[#a1a1aa]" />
             <span className="hidden sm:inline">Patch</span>
           </button>
 
           <button
             type="button"
             onClick={handleCopyCode}
-            className="flex items-center gap-1 rounded-lg border border-black/[0.08] bg-white hover:bg-black/[0.03] px-2.5 py-1 text-[11px] font-medium text-ink transition-colors shadow-2xs"
+            className="flex items-center gap-1 rounded-lg border border-black/[0.08] bg-white hover:bg-black/[0.03] px-2.5 py-1 text-[11px] font-medium text-ink transition-colors shadow-2xs dark:border-white/[0.1] dark:bg-white/[0.06] dark:text-[#f5f5f7] dark:hover:bg-white/[0.1]"
             title="Copy current code to clipboard"
           >
-            {copied ? <Check size={11} className="text-green" /> : <Copy size={11} className="text-muted" />}
+            {copied ? <Check size={11} className="text-green dark:text-[#34c759]" /> : <Copy size={11} className="text-muted dark:text-[#a1a1aa]" />}
             <span className="hidden sm:inline">{copied ? 'Copied' : 'Copy'}</span>
           </button>
         </div>
@@ -671,7 +782,7 @@ export default function CodeReview({
       {/* ========================================================================= */}
       {/* 2. IDE OPEN TABS STRIP (36px) — Horizontal Browser of Codebase Files     */}
       {/* ========================================================================= */}
-      <div className="flex h-[36px] shrink-0 items-center border-b border-black/[0.06] bg-[#f5f5f7] px-2 gap-1 overflow-x-auto select-none">
+      <div className="flex h-[36px] shrink-0 items-center border-b border-black/[0.06] bg-[#f5f5f7] surface-ide-bar px-2 gap-1 overflow-x-auto select-none dark:border-white/[0.08] dark:bg-[#0b0b0d]">
         {openTabs.map((tabPath) => {
           const file = allCodebaseFiles[tabPath] || { name: tabPath.split('/').pop(), modified: false, status: 'clean' }
           const isActive = tabPath === selectedFilePath
@@ -682,15 +793,15 @@ export default function CodeReview({
               onClick={() => setSelectedFilePath(tabPath)}
               className={`group flex h-[28px] items-center gap-2 rounded-lg px-2.5 text-[12px] font-medium transition-all cursor-pointer ${
                 isActive
-                  ? 'bg-white text-ink font-semibold shadow-xs border border-black/[0.06]'
-                  : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                  ? 'bg-white text-ink font-semibold shadow-xs border border-black/[0.06] dark:border-white/[0.1] dark:bg-[#1a1a1d] dark:text-white'
+                  : 'text-muted hover:bg-black/[0.04] hover:text-ink dark:text-[#a1a1aa] dark:hover:bg-white/[0.06] dark:hover:text-white'
               }`}
             >
-              <File size={13} className={isActive ? 'text-accent' : 'text-faint'} />
+              <File size={13} className={isActive ? 'text-accent' : 'text-faint dark:text-[#8e8e93]'} />
               <span className="truncate max-w-[140px]">{file.name}</span>
               {file.modified && (
                 <span className={`rounded px-1 font-mono text-[9px] font-bold ${
-                  file.status === 'A' ? 'bg-[#34c759]/20 text-[#1f7a37]' : 'bg-[#ff9500]/20 text-[#b45309]'
+                  file.status === 'A' ? 'bg-[#34c759]/20 text-[#17692e] dark:text-[#34c759]' : 'bg-[#ff9500]/20 text-[#8f4700] dark:text-[#ff9f0a]'
                 }`}>
                   {file.status || 'M'}
                 </span>
@@ -699,7 +810,7 @@ export default function CodeReview({
                 <button
                   type="button"
                   onClick={(e) => handleCloseTab(e, tabPath)}
-                  className="rounded p-0.5 text-faint hover:bg-black/[0.08] hover:text-ink transition-colors opacity-0 group-hover:opacity-100"
+                  className="rounded p-0.5 text-faint hover:bg-black/[0.08] hover:text-ink transition-colors opacity-0 group-hover:opacity-100 dark:text-[#8e8e93] dark:hover:bg-white/[0.1] dark:hover:text-white"
                   title="Close tab"
                 >
                   <X size={10} />
@@ -713,7 +824,7 @@ export default function CodeReview({
         <button
           type="button"
           onClick={() => setQuickOpenOpen(true)}
-          className="flex h-[26px] w-[26px] items-center justify-center rounded-lg text-faint hover:bg-black/[0.05] hover:text-ink transition-colors"
+          className="flex h-[26px] w-[26px] items-center justify-center rounded-lg text-faint hover:bg-black/[0.05] hover:text-ink transition-colors dark:text-[#8e8e93] dark:hover:bg-white/[0.08] dark:hover:text-white"
           title="Open another file from codebase (⌘P)"
         >
           <Plus size={14} />
@@ -723,26 +834,26 @@ export default function CodeReview({
       {/* ========================================================================= */}
       {/* 3. MAIN WORKSPACE: 3-Pane Layout (Explorer + Diff/Editor + Inspector)     */}
       {/* ========================================================================= */}
-      <div className="flex flex-1 min-w-0 overflow-hidden bg-white">
+      <div className="flex flex-1 min-w-0 overflow-hidden bg-white dark:bg-[#000000]">
         {/* PANEL 1: Whole Codebase File Explorer (Left 250px) */}
-        <div className="flex w-[250px] shrink-0 flex-col border-r border-black/[0.08] bg-[#fbfbfd]/70 text-[12px]">
+        <div className="flex w-[250px] shrink-0 flex-col border-r border-black/[0.08] bg-[#fbfbfd]/70 surface-ide-panel text-[12px] dark:border-white/[0.08] dark:bg-[#0b0b0d]/90">
           {/* Explorer Title */}
-          <div className="flex items-center justify-between border-b border-black/[0.06] px-3.5 py-2">
-            <span className="font-semibold uppercase tracking-wider text-[10.5px] text-faint">
+          <div className="flex items-center justify-between border-b border-black/[0.06] px-3.5 py-2 dark:border-white/[0.08]">
+            <span className="font-semibold uppercase tracking-wider text-[10.5px] text-faint dark:text-[#8e8e93]">
               Explorer: {run?.repo || 'commerce-core'}
             </span>
-            <span className="font-mono text-[10px] text-faint">
+            <span className="font-mono text-[10px] text-faint dark:text-[#8e8e93]">
               {fileList.length} files
             </span>
           </div>
 
           {/* Explorer Quick Filter */}
-          <div className="p-2 border-b border-black/[0.04]">
+          <div className="p-2 border-b border-black/[0.04] dark:border-white/[0.06]">
             <input
               value={explorerFilter}
               onChange={(e) => setExplorerFilter(e.target.value)}
               placeholder="Filter codebase..."
-              className="w-full rounded-lg bg-black/[0.04] px-2.5 py-1 text-[11.5px] text-ink outline-none placeholder:text-faint focus:bg-white focus:ring-1 focus:ring-accent"
+              className="w-full rounded-lg bg-black/[0.04] px-2.5 py-1 text-[11.5px] text-ink outline-none placeholder:text-faint focus:bg-white focus:ring-1 focus:ring-accent dark:bg-white/[0.06] dark:text-white dark:placeholder-[#71717a] dark:focus:bg-[#18181b]"
             />
           </div>
 
@@ -750,7 +861,7 @@ export default function CodeReview({
           <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5 font-mono text-[11.5px]">
             {explorerFilter.trim() ? (
               <div className="space-y-1">
-                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint">
+                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-faint dark:text-[#8e8e93]">
                   Filtered ({filteredQuickFiles.length})
                 </div>
                 {filteredQuickFiles.map((f) => {
@@ -761,21 +872,56 @@ export default function CodeReview({
                       type="button"
                       onClick={() => handleOpenFile(f.path)}
                       className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                        isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                        isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                       }`}
                     >
                       <div className="flex items-center gap-1.5 truncate">
-                        <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                        <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                         <span className="truncate">{f.name}</span>
                       </div>
                       {f.modified && (
-                        <span className="font-mono text-[9px] font-semibold text-[#1f7a37]">
+                        <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
                           +{f.add}
                         </span>
                       )}
                     </button>
                   )
                 })}
+              </div>
+            ) : hasRealFiles ? (
+              <div className="space-y-2">
+                {realFolders.map(([folder, files]) => (
+                  <div key={folder || '.'}>
+                    <div className="flex items-center gap-1.5 px-1.5 py-1 text-ink dark:text-[#f5f5f7]">
+                      <Folder size={13} className="text-accent" />
+                      <span className="font-sans font-semibold">{folder || '(root)'}</span>
+                    </div>
+                    <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
+                      {files.map((f) => {
+                        const isSelected = selectedFilePath === f.path
+                        return (
+                          <button
+                            key={f.path}
+                            type="button"
+                            onClick={() => handleOpenFile(f.path)}
+                            className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
+                              isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5 truncate">
+                              <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
+                              <span className="truncate">{f.name}</span>
+                              {f.status === 'A' && <span className="font-sans text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">NEW</span>}
+                            </div>
+                            <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
+                              +{f.add}{f.rem ? ` -${f.rem}` : ''}
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : (
               /* Project Root Folder */
@@ -785,28 +931,28 @@ export default function CodeReview({
                 <button
                   type="button"
                   onClick={() => toggleFolder('src')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
                 >
-                  <ChevronDown size={12} className={`text-faint transition-transform ${expandedFolders.has('src') ? '' : '-rotate-90'}`} />
+                  <ChevronDown size={12} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src') ? '' : '-rotate-90'}`} />
                   <Folder size={13} className="text-accent" />
                   <span className="font-sans font-semibold">src</span>
                 </button>
 
                 {expandedFolders.has('src') && (
-                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5">
+                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
                     {/* checkout subfolder */}
                     <div>
                       <button
                         type="button"
                         onClick={() => toggleFolder('src/checkout')}
-                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04]"
+                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
                       >
-                        <ChevronDown size={11} className={`text-faint transition-transform ${expandedFolders.has('src/checkout') ? '' : '-rotate-90'}`} />
+                        <ChevronDown size={11} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src/checkout') ? '' : '-rotate-90'}`} />
                         <Folder size={12} className="text-accent/80" />
                         <span className="font-sans">checkout</span>
                       </button>
                       {expandedFolders.has('src/checkout') && (
-                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5">
+                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
                           {['src/checkout/webhook.py', 'src/checkout/service.py', 'src/checkout/schemas.py'].map((path) => {
                             const f = allCodebaseFiles[path]
                             if (!f) return null
@@ -817,15 +963,15 @@ export default function CodeReview({
                                 type="button"
                                 onClick={() => handleOpenFile(f.path)}
                                 className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                                  isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                                  isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                                 }`}
                               >
                                 <div className="flex items-center gap-1.5 truncate">
-                                  <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                                  <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                                   <span className="truncate">{f.name}</span>
                                 </div>
                                 {f.modified && (
-                                  <span className="font-mono text-[9px] font-semibold text-[#1f7a37]">
+                                  <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
                                     +{f.add}
                                   </span>
                                 )}
@@ -841,14 +987,14 @@ export default function CodeReview({
                       <button
                         type="button"
                         onClick={() => toggleFolder('src/middleware')}
-                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04]"
+                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
                       >
-                        <ChevronDown size={11} className={`text-faint transition-transform ${expandedFolders.has('src/middleware') ? '' : '-rotate-90'}`} />
+                        <ChevronDown size={11} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src/middleware') ? '' : '-rotate-90'}`} />
                         <Folder size={12} className="text-accent/80" />
                         <span className="font-sans">middleware</span>
                       </button>
                       {expandedFolders.has('src/middleware') && (
-                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5">
+                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
                           {['src/middleware/throttle.py', 'src/middleware/auth.py'].map((path) => {
                             const f = allCodebaseFiles[path]
                             if (!f) return null
@@ -859,15 +1005,15 @@ export default function CodeReview({
                                 type="button"
                                 onClick={() => handleOpenFile(f.path)}
                                 className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                                  isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                                  isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                                 }`}
                               >
                                 <div className="flex items-center gap-1.5 truncate">
-                                  <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                                  <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                                   <span className="truncate">{f.name}</span>
                                 </div>
                                 {f.modified && (
-                                  <span className="font-mono text-[9px] font-semibold text-[#1f7a37]">
+                                  <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
                                     +{f.add}
                                   </span>
                                 )}
@@ -883,14 +1029,14 @@ export default function CodeReview({
                       <button
                         type="button"
                         onClick={() => toggleFolder('src/deps')}
-                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04]"
+                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
                       >
-                        <ChevronDown size={11} className={`text-faint transition-transform ${expandedFolders.has('src/deps') ? '' : '-rotate-90'}`} />
+                        <ChevronDown size={11} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src/deps') ? '' : '-rotate-90'}`} />
                         <Folder size={12} className="text-accent/80" />
                         <span className="font-sans">deps</span>
                       </button>
                       {expandedFolders.has('src/deps') && (
-                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5">
+                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
                           {['src/deps/redis.py', 'src/deps/database.py'].map((path) => {
                             const f = allCodebaseFiles[path]
                             if (!f) return null
@@ -901,15 +1047,15 @@ export default function CodeReview({
                                 type="button"
                                 onClick={() => handleOpenFile(f.path)}
                                 className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                                  isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                                  isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                                 }`}
                               >
                                 <div className="flex items-center gap-1.5 truncate">
-                                  <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                                  <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                                   <span className="truncate">{f.name}</span>
                                 </div>
                                 {f.modified && (
-                                  <span className="font-mono text-[9px] font-semibold text-[#1f7a37]">
+                                  <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
                                     +{f.add}
                                   </span>
                                 )}
@@ -928,14 +1074,14 @@ export default function CodeReview({
                 <button
                   type="button"
                   onClick={() => toggleFolder('tests')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
                 >
-                  <ChevronDown size={12} className={`text-faint transition-transform ${expandedFolders.has('tests') ? '' : '-rotate-90'}`} />
+                  <ChevronDown size={12} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('tests') ? '' : '-rotate-90'}`} />
                   <Folder size={13} className="text-accent" />
                   <span className="font-sans font-semibold">tests</span>
                 </button>
                 {expandedFolders.has('tests') && (
-                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5">
+                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
                     {['tests/test_webhook.py', 'tests/test_throttle.py', 'tests/conftest.py'].map((path) => {
                       const f = allCodebaseFiles[path]
                       if (!f) return null
@@ -946,15 +1092,15 @@ export default function CodeReview({
                           type="button"
                           onClick={() => handleOpenFile(f.path)}
                           className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                            isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                            isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                           }`}
                         >
                           <div className="flex items-center gap-1.5 truncate">
-                            <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                            <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                             <span className="truncate">{f.name}</span>
                           </div>
                           {f.modified && (
-                            <span className="font-mono text-[9px] font-semibold text-[#1f7a37]">
+                            <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
                               +{f.add}
                             </span>
                           )}
@@ -970,14 +1116,14 @@ export default function CodeReview({
                 <button
                   type="button"
                   onClick={() => toggleFolder('config')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
                 >
-                  <ChevronDown size={12} className={`text-faint transition-transform ${expandedFolders.has('config') ? '' : '-rotate-90'}`} />
+                  <ChevronDown size={12} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('config') ? '' : '-rotate-90'}`} />
                   <Folder size={13} className="text-accent" />
                   <span className="font-sans font-semibold">config</span>
                 </button>
                 {expandedFolders.has('config') && (
-                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5">
+                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
                     {['config/settings.py'].map((path) => {
                       const f = allCodebaseFiles[path]
                       if (!f) return null
@@ -988,15 +1134,15 @@ export default function CodeReview({
                           type="button"
                           onClick={() => handleOpenFile(f.path)}
                           className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                            isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                            isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                           }`}
                         >
                           <div className="flex items-center gap-1.5 truncate">
-                            <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                            <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                             <span className="truncate">{f.name}</span>
                           </div>
                           {f.modified && (
-                            <span className="font-mono text-[9px] font-semibold text-[#1f7a37]">
+                            <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
                               +{f.add} -{f.rem}
                             </span>
                           )}
@@ -1018,11 +1164,11 @@ export default function CodeReview({
                     type="button"
                     onClick={() => handleOpenFile(f.path)}
                     className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                      isSelected ? 'bg-accent/15 text-accent font-semibold' : 'text-muted hover:bg-black/[0.04] hover:text-ink'
+                      isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
                     }`}
                   >
                     <div className="flex items-center gap-1.5 truncate">
-                      <File size={12} className={isSelected ? 'text-accent' : 'text-faint'} />
+                      <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
                       <span className="truncate">{f.name}</span>
                     </div>
                   </button>
@@ -1034,14 +1180,14 @@ export default function CodeReview({
         </div>
 
         {/* PANEL 2: Center Code Diff & Source Editor */}
-        <div className="flex flex-1 min-w-0 flex-col bg-white overflow-hidden">
+        <div className="flex flex-1 min-w-0 flex-col bg-white overflow-hidden dark:bg-[#000000]">
           {/* Subheader / Status Bar of the Active File */}
-          <div className="flex h-[32px] shrink-0 items-center justify-between border-b border-black/[0.06] bg-black/[0.015] px-4 text-[11.5px] gap-2 min-w-0">
-            <div className="flex items-center gap-2 font-mono text-muted min-w-0 truncate">
-              <span className="font-semibold text-ink truncate">{activeFile.path}</span>
-              {activeFile.header && <span className="text-faint shrink-0">{activeFile.header}</span>}
+          <div className="flex h-[32px] shrink-0 items-center justify-between border-b border-black/[0.06] bg-black/[0.015] px-4 text-[11.5px] gap-2 min-w-0 dark:border-white/[0.08] dark:bg-white/[0.02]">
+            <div className="flex items-center gap-2 font-mono text-muted min-w-0 truncate dark:text-[#a1a1aa]">
+              <span className="font-semibold text-ink truncate dark:text-[#f5f5f7]">{activeFile.path}</span>
+              {activeFile.header && <span className="text-faint shrink-0 dark:text-[#8e8e93]">{activeFile.header}</span>}
               {!activeFile.modified && (
-                <span className="rounded bg-black/[0.04] px-1.5 py-0.5 text-[10px] text-faint shrink-0">
+                <span className="rounded bg-black/[0.04] px-1.5 py-0.5 text-[10px] text-faint shrink-0 dark:bg-white/[0.06] dark:text-[#8e8e93]">
                   Clean · Unmodified
                 </span>
               )}
@@ -1051,7 +1197,7 @@ export default function CodeReview({
               <button
                 type="button"
                 onClick={() => setFullFileModal(true)}
-                className="text-muted hover:text-ink flex items-center gap-1 transition-colors text-[11px]"
+                className="text-muted hover:text-ink flex items-center gap-1 transition-colors text-[11px] dark:text-[#a1a1aa] dark:hover:text-white"
               >
                 <Eye size={12} /> Full view
               </button>
@@ -1059,7 +1205,7 @@ export default function CodeReview({
           </div>
 
           {/* Diff & Code Surface */}
-          <div className="relative flex-1 overflow-auto bg-white font-mono text-[12px] leading-[1.65]">
+          <div className="relative flex-1 overflow-auto bg-white font-mono text-[12px] leading-[1.65] dark:bg-[#000000]">
             <div className="py-2 min-w-full">
               {diffLines.map((line, idx) => {
                 const lineNo = line.n2 || line.n1 || idx + 1
@@ -1067,25 +1213,25 @@ export default function CodeReview({
                 const isAdd = line.type === 'add'
 
                 // Diff line highlighting
-                const bg = isRem ? 'bg-[#ff3b30]/10' : isAdd ? 'bg-[#34c759]/10' : ''
+                const bg = isRem ? 'bg-[#ff3b30]/10 dark:bg-[#ff453a]/15' : isAdd ? 'bg-[#34c759]/10 dark:bg-[#34c759]/15' : ''
                 const sign = isRem ? '-' : isAdd ? '+' : ' '
-                const signColor = isRem ? 'text-[#d70015] font-bold' : isAdd ? 'text-[#1f7a37] font-bold' : 'text-transparent'
+                const signColor = isRem ? 'text-[#d70015] dark:text-[#ff453a] font-bold' : isAdd ? 'text-[#17692e] dark:text-[#34c759] font-bold' : 'text-transparent'
 
-                // Anchored floating review card on Line 42 of webhook.py
-                const isTargetLine42 = activeFile.path.includes('webhook.py') && lineNo === 42 && isAdd
+                // Anchored floating review card on Line 42 of webhook.py (demo only)
+                const isTargetLine42 = !hasRealFiles && activeFile.path.includes('webhook.py') && lineNo === 42 && isAdd
                 const showAnchoredCard = isTargetLine42 && !anchoredCardDismissed
                 const isDraftingComment = activeCommentLine === lineNo
 
                 return (
                   <div key={idx} className="relative group">
-                    <div className={`flex items-stretch hover:bg-black/[0.02] ${bg}`}>
+                    <div className={`flex items-stretch hover:bg-black/[0.02] dark:hover:bg-white/[0.04] ${bg}`}>
                       {/* Line Number Gutter with Hover Comment Button */}
-                      <div className="w-14 shrink-0 select-none px-2 text-right font-mono text-[11px] text-faint flex items-center justify-end gap-1.5">
+                      <div className="w-14 shrink-0 select-none px-2 text-right font-mono text-[11px] text-faint flex items-center justify-end gap-1.5 dark:text-[#a1a1aa]">
                         <button
                           type="button"
                           onClick={() => setActiveCommentLine(isDraftingComment ? null : lineNo)}
                           title="Click to comment on this line for agent rework"
-                          className="opacity-0 group-hover:opacity-100 text-accent hover:scale-125 transition-all p-0.5 rounded hover:bg-black/[0.06]"
+                          className="opacity-0 group-hover:opacity-100 text-accent hover:scale-125 transition-all p-0.5 rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.1]"
                         >
                           <Plus size={11} strokeWidth={2.5} />
                         </button>
@@ -1105,36 +1251,36 @@ export default function CodeReview({
 
                     {/* Anchored Review Card on Line 42 */}
                     {showAnchoredCard && (
-                      <div className="relative my-2 ml-16 mr-8 rounded-2xl border border-black/[0.08] bg-white p-4 shadow-pop animate-rise z-20">
+                      <div className="relative my-2 ml-16 mr-8 rounded-2xl border border-black/[0.08] bg-white p-4 shadow-pop animate-rise z-20 dark:border-white/[0.12] dark:bg-[#18181b]">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-b from-[#1d1d1f] to-[#3a3a3c] font-bold text-white text-[10px] shadow-xs">
+                            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-b from-[#1d1d1f] to-[#3a3a3c] dark:from-[#48484a] dark:to-[#2c2c2e] font-bold text-white text-[10px] shadow-xs">
                               AS
                             </span>
                             <div>
-                              <span className="font-semibold text-ink text-[12px]">Reviewer ({reviewerRole})</span>
-                              <span className="ml-2 font-mono text-[10px] text-faint">Line 42</span>
+                              <span className="font-semibold text-ink text-[12px] dark:text-[#f5f5f7]">Reviewer ({reviewerRole})</span>
+                              <span className="ml-2 font-mono text-[10px] text-faint dark:text-[#8e8e93]">Line 42</span>
                             </div>
                           </div>
                           <button
                             type="button"
                             onClick={() => setAnchoredCardDismissed(true)}
-                            className="text-faint hover:text-ink p-1 rounded-md hover:bg-black/[0.04]"
+                            className="text-faint hover:text-ink p-1 rounded-md hover:bg-black/[0.04] dark:text-[#8e8e93] dark:hover:text-white dark:hover:bg-white/[0.08]"
                             title="Dismiss review note"
                           >
                             <X size={13} />
                           </button>
                         </div>
 
-                        <div className="mt-2.5 text-[12.5px] font-sans leading-relaxed text-ink pl-8">
+                        <div className="mt-2.5 text-[12.5px] font-sans leading-relaxed text-ink pl-8 dark:text-[#e4e4e7]">
                           Rate limiter key should use hashed tenant ID instead of raw IP to prevent spoofing behind Cloudflare proxies.
                         </div>
 
-                        <div className="mt-3.5 flex items-center justify-end gap-2 border-t border-black/[0.05] pt-2.5">
+                        <div className="mt-3.5 flex items-center justify-end gap-2 border-t border-black/[0.05] pt-2.5 dark:border-white/[0.08]">
                           <button
                             type="button"
                             onClick={() => setAnchoredCardDismissed(true)}
-                            className="rounded-lg px-2.5 py-1 text-[11px] font-medium text-muted hover:bg-black/[0.04] hover:text-ink transition-colors"
+                            className="rounded-lg px-2.5 py-1 text-[11px] font-medium text-muted hover:bg-black/[0.04] hover:text-ink transition-colors dark:text-[#a1a1aa] dark:hover:bg-white/[0.08] dark:hover:text-white"
                           >
                             Resolve
                           </button>
@@ -1153,7 +1299,7 @@ export default function CodeReview({
 
                     {/* Custom Line Comment Drawer */}
                     {isDraftingComment && (
-                      <div className="border-y border-accent/20 bg-accent/[0.03] p-3 pl-16 space-y-2">
+                      <div className="border-y border-accent/20 bg-accent/[0.03] p-3 pl-16 space-y-2 dark:bg-accent/[0.06]">
                         <div className="flex items-center justify-between">
                           <span className="text-[11.5px] font-semibold text-accent flex items-center gap-1.5 font-sans">
                             <MessageSquare size={12} />
@@ -1162,7 +1308,7 @@ export default function CodeReview({
                           <button
                             type="button"
                             onClick={() => setActiveCommentLine(null)}
-                            className="text-faint hover:text-ink"
+                            className="text-faint hover:text-ink dark:text-[#8e8e93] dark:hover:text-white"
                           >
                             <X size={12} />
                           </button>
@@ -1172,13 +1318,13 @@ export default function CodeReview({
                           onChange={(e) => setCommentText(e.target.value)}
                           placeholder="Explain required changes or rework instructions for the agent..."
                           rows={2}
-                          className="w-full rounded-xl border border-black/[0.1] bg-white p-2.5 text-[12px] font-sans text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+                          className="w-full rounded-xl border border-black/[0.1] bg-white p-2.5 text-[12px] font-sans text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 dark:border-white/[0.12] dark:bg-[#121214] dark:text-white dark:placeholder-[#71717a]"
                         />
                         <div className="flex justify-end gap-2 font-sans">
                           <button
                             type="button"
                             onClick={() => setActiveCommentLine(null)}
-                            className="rounded-lg border border-black/[0.08] px-2.5 py-1 text-[11px] font-medium text-ink hover:bg-black/[0.04]"
+                            className="rounded-lg border border-black/[0.08] px-2.5 py-1 text-[11px] font-medium text-ink hover:bg-black/[0.04] dark:border-white/[0.1] dark:text-[#f5f5f7] dark:hover:bg-white/[0.08]"
                           >
                             Cancel
                           </button>
@@ -1202,70 +1348,68 @@ export default function CodeReview({
 
         {/* PANEL 3: Right Inspector Rail (260px) */}
         {showInspector && (
-          <div className="flex w-[260px] shrink-0 flex-col border-l border-black/[0.08] bg-[#fbfbfd]/80 p-4 gap-4 overflow-y-auto select-none font-sans">
+          <div className="flex w-[260px] shrink-0 flex-col border-l border-black/[0.08] bg-[#fbfbfd]/80 surface-ide-panel p-4 gap-4 overflow-y-auto select-none font-sans dark:border-white/[0.08] dark:bg-[#0b0b0d]/90">
             {/* Pipeline Stage Timeline */}
-            <div className="rounded-2xl border border-black/[0.06] bg-white p-4 shadow-card">
-              <div className="text-[11.5px] font-semibold uppercase tracking-wider text-faint mb-3">
+            <div className="rounded-2xl border border-black/[0.06] bg-white p-4 shadow-card dark:border-white/[0.08] dark:bg-[#141416]">
+              <div className="text-[11.5px] font-semibold uppercase tracking-wider text-faint mb-3 dark:text-[#8e8e93]">
                 Pipeline Stage
               </div>
               <div className="relative space-y-3 text-[12px]">
-                <div className="absolute left-[9px] top-3 bottom-3 w-0.5 bg-black/[0.08] -z-0" />
-
-                <div className="relative z-10 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34c759] text-white shadow-xs">
-                      <Check size={12} strokeWidth={2.5} />
-                    </span>
-                    <span className="font-medium text-ink">Requirements</span>
-                  </div>
-                  <span className="font-mono text-[10px] text-[#1f7a37] font-semibold">Passed</span>
-                </div>
-
-                <div className="relative z-10 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34c759] text-white shadow-xs">
-                      <Check size={12} strokeWidth={2.5} />
-                    </span>
-                    <span className="font-medium text-ink">Design Gate</span>
-                  </div>
-                  <span className="font-mono text-[10px] text-[#1f7a37] font-semibold">Passed</span>
-                </div>
-
-                <div className="relative z-10 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34c759] text-white shadow-xs">
-                      <Check size={12} strokeWidth={2.5} />
-                    </span>
-                    <span className="font-medium text-ink">Code &amp; Tests</span>
-                  </div>
-                  <span className="font-mono text-[10px] text-[#1f7a37] font-semibold">Passed</span>
-                </div>
-
-                <div className="relative z-10 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="relative flex h-5 w-5 items-center justify-center rounded-full bg-[#0071e3] text-white shadow-[0_0_12px_rgba(0,113,227,0.65)] ring-4 ring-[#0071e3]/25 animate-pulse">
-                      <span className="h-1.5 w-1.5 rounded-full bg-white" />
-                    </span>
-                    <span className="font-semibold text-accent">Gate Node</span>
-                  </div>
-                  <span className="font-mono text-[10px] text-accent font-semibold">Awaiting</span>
-                </div>
+                <div className="absolute left-[9px] top-3 bottom-3 w-0.5 bg-black/[0.08] -z-0 dark:bg-white/[0.1]" />
+                {(run?.steps || []).map((step) => {
+                  const isGate = step.key?.startsWith('g')
+                  const done = step.state === 'approved'
+                  const active = step.state === 'active'
+                  const rejected = step.state === 'rejected'
+                  const label = done ? (isGate ? 'Approved' : 'Passed')
+                    : rejected ? 'Rejected'
+                      : active ? (isGate ? 'Awaiting' : 'Running')
+                        : 'Pending'
+                  return (
+                    <div key={step.key} className="relative z-10 flex items-center justify-between" title={step.at || ''}>
+                      <div className="flex min-w-0 items-center gap-2">
+                        {done ? (
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#34c759] text-white shadow-xs">
+                            <Check size={12} strokeWidth={2.5} />
+                          </span>
+                        ) : rejected ? (
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#ff3b30] text-white shadow-xs">
+                            <X size={12} strokeWidth={2.5} />
+                          </span>
+                        ) : active ? (
+                          <span className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#0071e3] text-white shadow-[0_0_12px_rgba(0,113,227,0.65)] ring-4 ring-[#0071e3]/25 animate-pulse">
+                            <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                          </span>
+                        ) : (
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 border-black/[0.12] bg-white dark:border-white/[0.2] dark:bg-[#1e1e22]" />
+                        )}
+                        <span className={`truncate ${active ? 'font-semibold text-accent dark:text-[#4da3ff]' : done || rejected ? 'font-medium text-ink dark:text-[#f5f5f7]' : 'text-muted dark:text-[#a1a1aa]'}`}>
+                          {step.label}{isGate && step.role ? ` (${step.role})` : ''}
+                        </span>
+                      </div>
+                      <span className={`shrink-0 font-mono text-[10px] font-semibold ${
+                        done ? 'text-[#17692e] dark:text-[#34c759]' : rejected ? 'text-[#c4161c] dark:text-[#ff453a]' : active ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'
+                      }`}>{label}</span>
+                    </div>
+                  )
+                })}
+                {!run?.steps?.length && <div className="text-[12px] text-muted dark:text-[#a1a1aa]">No pipeline data for this run.</div>}
               </div>
             </div>
 
             {/* SHA-256 Ledger Card */}
-            <div className="rounded-2xl border border-black/[0.06] bg-white p-4 shadow-card">
+            <div className="rounded-2xl border border-black/[0.06] bg-white p-4 shadow-card dark:border-white/[0.08] dark:bg-[#141416]">
               <div className="flex items-center gap-3">
                 <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                  run?.verified !== false ? 'bg-[#34c759]/10 text-[#1f7a37]' : 'bg-[#ff3b30]/10 text-[#d70015]'
+                  run?.verified !== false ? 'bg-[#34c759]/10 text-[#17692e] dark:text-[#34c759]' : 'bg-[#ff3b30]/10 text-[#d70015] dark:text-[#ff453a]'
                 }`}>
                   {run?.verified !== false ? <ShieldCheck size={20} strokeWidth={2} /> : <ShieldAlert size={20} strokeWidth={2} />}
                 </span>
                 <div className="min-w-0 flex-1 leading-tight">
-                  <div className="text-[12.5px] font-semibold text-ink">
+                  <div className="text-[12.5px] font-semibold text-ink dark:text-[#f5f5f7]">
                     {run?.verified !== false ? 'SHA-256 Verified' : 'Chain Broken'}
                   </div>
-                  <div className="text-[11px] text-faint">Tamper-evident ledger</div>
+                  <div className="text-[11px] text-faint dark:text-[#8e8e93]">Tamper-evident ledger</div>
                 </div>
               </div>
 
@@ -1273,7 +1417,7 @@ export default function CodeReview({
                 <button
                   type="button"
                   onClick={() => onTamper(2)}
-                  className="mt-3 w-full rounded-lg border border-black/[0.08] bg-black/[0.025] hover:bg-black/[0.06] py-1.5 text-[11px] font-medium text-ink transition-colors flex items-center justify-center gap-1.5"
+                  className="mt-3 w-full rounded-lg border border-black/[0.08] bg-black/[0.025] hover:bg-black/[0.06] py-1.5 text-[11px] font-medium text-ink transition-colors flex items-center justify-center gap-1.5 dark:border-white/[0.1] dark:bg-white/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.08]"
                   title="Test cryptographic audit failure by modifying event #2 directly in database"
                 >
                   <TriangleAlert size={12} className="text-[#ff9500]" />
@@ -1284,7 +1428,7 @@ export default function CodeReview({
 
             {/* Approve Gate Action Button */}
             {canAct && (
-              <div className="rounded-2xl border border-accent/25 bg-accent/[0.03] p-3 text-center space-y-2 shadow-xs">
+              <div className="rounded-2xl border border-accent/25 bg-accent/[0.03] p-3 text-center space-y-2 shadow-xs dark:bg-accent/[0.06]">
                 <div className="text-[11.5px] font-medium text-accent">
                   Gate ready for reviewer decision
                 </div>
@@ -1300,7 +1444,7 @@ export default function CodeReview({
                   <button
                     type="button"
                     onClick={() => onDecide?.('reject')}
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-black/[0.08] bg-white px-3 py-1.5 text-[12px] font-medium text-ink hover:bg-black/[0.04] active:scale-[0.98] transition-all"
+                    className="control-danger inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-black/[0.08] bg-white px-3 py-1.5 text-[12px] font-medium text-ink hover:bg-black/[0.04] active:scale-[0.98] transition-all dark:border-white/[0.1] dark:bg-white/[0.06] dark:text-[#f5f5f7] dark:hover:bg-white/[0.1]"
                   >
                     <RotateCcw size={12} />
                     <span>Request Changes</span>
@@ -1321,19 +1465,19 @@ export default function CodeReview({
           onClick={() => setQuickOpenOpen(false)}
         >
           <div
-            className="w-full max-w-xl rounded-2xl border border-black/[0.1] bg-white shadow-pop overflow-hidden animate-rise"
+            className="w-full max-w-xl rounded-2xl border border-black/[0.1] bg-white shadow-pop overflow-hidden animate-rise dark:border-white/[0.12] dark:bg-[#18181b]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center gap-3 border-b border-black/[0.06] px-4 py-3">
-              <Search size={16} className="text-muted" />
+            <div className="flex items-center gap-3 border-b border-black/[0.06] px-4 py-3 dark:border-white/[0.08]">
+              <Search size={16} className="text-muted dark:text-[#a1a1aa]" />
               <input
                 autoFocus
                 value={quickSearch}
                 onChange={(e) => setQuickSearch(e.target.value)}
                 placeholder="Type the name of a file to open in the IDE..."
-                className="w-full text-[13px] text-ink outline-none placeholder:text-faint"
+                className="w-full bg-transparent text-[13px] text-ink outline-none placeholder:text-faint dark:text-white dark:placeholder-[#71717a]"
               />
-              <kbd className="rounded border border-black/[0.08] bg-black/[0.03] px-1.5 py-0.5 font-mono text-[10px] text-faint">
+              <kbd className="rounded border border-black/[0.08] bg-black/[0.03] px-1.5 py-0.5 font-mono text-[10px] text-faint dark:border-white/[0.12] dark:bg-white/10 dark:text-[#a1a1aa]">
                 ESC
               </kbd>
             </div>
@@ -1345,20 +1489,20 @@ export default function CodeReview({
                   type="button"
                   onClick={() => handleOpenFile(f.path)}
                   className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition-colors ${
-                    f.path === selectedFilePath ? 'bg-accent/10 text-accent font-semibold' : 'text-ink hover:bg-black/[0.04]'
+                    f.path === selectedFilePath ? 'bg-accent/10 text-accent font-semibold' : 'text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]'
                   }`}
                 >
                   <div className="flex items-center gap-2.5 truncate">
-                    <File size={14} className={f.path === selectedFilePath ? 'text-accent' : 'text-faint'} />
+                    <File size={14} className={f.path === selectedFilePath ? 'text-accent' : 'text-faint dark:text-[#8e8e93]'} />
                     <span className="text-[13px]">{f.name}</span>
-                    <span className="font-mono text-[11px] text-faint truncate">{f.path}</span>
+                    <span className="font-mono text-[11px] text-faint truncate dark:text-[#8e8e93]">{f.path}</span>
                   </div>
                   {f.modified ? (
-                    <span className="rounded bg-[#ff9500]/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#b45309]">
+                    <span className="rounded bg-[#ff9500]/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#8f4700] dark:text-[#ff9f0a]">
                       +{f.add} -{f.rem}
                     </span>
                   ) : (
-                    <span className="text-[11px] text-faint">clean</span>
+                    <span className="text-[11px] text-faint dark:text-[#8e8e93]">clean</span>
                   )}
                 </button>
               ))}
@@ -1374,24 +1518,24 @@ export default function CodeReview({
           onClick={() => setFullFileModal(false)}
         >
           <div
-            className="flex h-[80vh] w-full max-w-4xl flex-col rounded-3xl border border-black/[0.08] bg-white shadow-pop overflow-hidden"
+            className="flex h-[80vh] w-full max-w-4xl flex-col rounded-3xl border border-black/[0.08] bg-white shadow-pop overflow-hidden dark:border-white/[0.12] dark:bg-[#18181b]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-black/[0.06] bg-black/[0.015] px-6 py-3.5">
+            <div className="flex items-center justify-between border-b border-black/[0.06] bg-black/[0.015] px-6 py-3.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
               <div className="flex items-center gap-2">
                 <File size={16} className="text-accent" />
-                <span className="font-mono text-[13px] font-semibold text-ink">{activeFile.path}</span>
-                <span className="rounded-full bg-black/[0.05] px-2 py-0.5 font-mono text-[11px] text-faint">Full Source</span>
+                <span className="font-mono text-[13px] font-semibold text-ink dark:text-[#f5f5f7]">{activeFile.path}</span>
+                <span className="rounded-full bg-black/[0.05] px-2 py-0.5 font-mono text-[11px] text-faint dark:bg-white/10 dark:text-[#a1a1aa]">Full Source</span>
               </div>
               <button
                 type="button"
                 onClick={() => setFullFileModal(false)}
-                className="rounded-full p-1 text-muted hover:bg-black/[0.06] hover:text-ink transition-colors"
+                className="rounded-full p-1 text-muted hover:bg-black/[0.06] hover:text-ink transition-colors dark:text-[#a1a1aa] dark:hover:bg-white/[0.08] dark:hover:text-white"
               >
                 <X size={17} />
               </button>
             </div>
-            <div className="flex-1 overflow-auto bg-[#0d1117] p-5 font-mono text-[12px] leading-relaxed text-[#e6edf3]">
+            <div className="flex-1 overflow-auto bg-[#f8f9fa] dark:bg-[#090b0e] p-5 font-mono text-[12px] leading-relaxed text-[#24292f] dark:text-[#e6edf3]">
               <pre className="whitespace-pre">
                 {diffLines.map((l, i) => (
                   <div key={i} className="flex">

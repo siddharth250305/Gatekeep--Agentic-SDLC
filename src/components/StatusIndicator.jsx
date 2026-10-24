@@ -12,11 +12,11 @@ const STATUS = {
 }
 
 const TEXT  = {
-  green: 'text-[#1f7a37]',
-  red: 'text-[#d70015]',
-  amber: 'text-[#b25000]',
-  blue: 'text-[#0071e3]',
-  faint: 'text-[#86868b]',
+  green: 'text-[#17692e] dark:text-[#34c759]',
+  red: 'text-[#d70015] dark:text-[#ff453a]',
+  amber: 'text-[#8f4700] dark:text-[#ff9f0a]',
+  blue: 'text-accent dark:text-[#409cff]',
+  faint: 'text-faint dark:text-[#8e8e93]',
 }
 
 const DOT = {
@@ -28,11 +28,11 @@ const DOT = {
 }
 
 const CHIP = {
-  green: 'bg-[#34c759]/12 text-[#1f7a37] border-green/20',
-  red: 'bg-[#ff3b30]/12 text-[#d70015] border-red/20',
-  amber: 'bg-[#ff9500]/12 text-[#b25000] border-amber/20',
-  blue: 'bg-[#0071e3]/12 text-[#0071e3] border-blue/20',
-  faint: 'bg-black/[0.04] text-[#86868b] border-black/[0.04]',
+  green: 'bg-[#34c759]/12 text-[#17692e] dark:text-[#34c759] border-green/20 dark:border-[#34c759]/30',
+  red: 'bg-[#ff3b30]/12 text-[#d70015] dark:text-[#ff453a] border-red/20 dark:border-[#ff3b30]/30',
+  amber: 'bg-[#ff9500]/12 text-[#8f4700] dark:text-[#ff9f0a] border-amber/20 dark:border-[#ff9500]/30',
+  blue: 'bg-[#0071e3]/12 text-accent dark:text-[#409cff] border-blue/20 dark:border-[#0071e3]/30',
+  faint: 'bg-black/[0.04] dark:bg-white/[0.08] text-faint dark:text-[#8e8e93] border-black/[0.04] dark:border-white/[0.08]',
 }
 
 function Dot({ color, live, pending }) {

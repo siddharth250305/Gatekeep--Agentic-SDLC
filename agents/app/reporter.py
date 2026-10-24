@@ -11,7 +11,7 @@ class HttpReporter:
         import httpx
 
         self._httpx = httpx
-        self.base = base or os.getenv("GATEKEEP_API", "http://localhost:4000")
+        self.base = base or os.getenv("GATEKEEP_API", "http://localhost:4040")
 
     def phase(self, run_id: str, key: str, **fields):
         self._httpx.put(f"{self.base}/runs/{run_id}/phases/{key}", json=fields, timeout=8)

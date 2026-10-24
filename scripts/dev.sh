@@ -12,12 +12,12 @@ case "$1" in
     printf "waiting for postgres"
     for i in $(seq 1 20); do $DC exec -T db pg_isready -U gatekeep >/dev/null 2>&1 && break; printf "."; sleep 1; done; echo
     (cd "$ROOT/backend" && PIPELINE_URL=http://localhost:8077 nohup node src/server.js > /tmp/gk-api.log 2>&1 & disown)
-    (cd "$ROOT/agents" && . .venv/bin/activate && CHECKPOINT_DB="$PG" GATEKEEP_API=http://localhost:4000 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
-    (cd "$ROOT/agents" && . .venv/bin/activate && GATEKEEP_API=http://localhost:4000 nohup python -m app.mcp.server > /tmp/gk-mcp.log 2>&1 & disown)
+    (cd "$ROOT/agents" && . .venv/bin/activate && CHECKPOINT_DB="$PG" GATEKEEP_API=http://localhost:4040 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
+    (cd "$ROOT/agents" && . .venv/bin/activate && GATEKEEP_API=http://localhost:4040 nohup python -m app.mcp.server > /tmp/gk-mcp.log 2>&1 & disown)
     (cd "$ROOT" && nohup npm run dev > /tmp/gk-fe.log 2>&1 & disown)
     sleep 4
-    echo "  UI:    http://localhost:5173"
-    echo "  API:   http://localhost:4000  (logs: /tmp/gk-api.log)"
+    echo "  UI:    http://localhost:5180"
+    echo "  API:   http://localhost:4040  (logs: /tmp/gk-api.log)"
     echo "  Agent: http://localhost:8077  (logs: /tmp/gk-agents.log)"
     echo "  MCP:   http://localhost:8078/sse  (logs: /tmp/gk-mcp.log)"
     ;;

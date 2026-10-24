@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Search, ChevronRight, ChevronDown, GitBranch, GitCommitHorizontal, Calendar, Ellipsis, CircleAlert, Plus, X, Zap,
   LayoutDashboard, FileText, Code, ShieldCheck, ShieldAlert, Download, Copy, RefreshCw, Check, ArrowRight,
-  RotateCcw, Sparkles, Terminal
+  RotateCcw, Sparkles, Terminal, Sun, Moon
 } from 'lucide-react'
 import { runs as demoRuns, REVIEWER } from './data/runs'
 import { api, connectRealtime } from './api'
@@ -15,11 +15,91 @@ import ReworkModal from './components/ReworkModal'
 
 const withExtras = (run) => run
 
+const NAV_TABS = [
+  { key: 'overview', label: 'Overview', title: 'Overview Dashboard', Icon: LayoutDashboard },
+  { key: 'specs', label: 'Specs & Design', title: 'Specs & Design Review', Icon: FileText },
+  { key: 'code', label: 'Code Review', title: 'Code Review IDE', Icon: Code },
+  { key: 'tests', label: 'Test Results', title: 'Test Results & Sandbox', Icon: ShieldCheck },
+  { key: 'audit', label: 'Audit Chain', title: 'Cryptographic Audit Chain', Icon: Terminal },
+]
+
+// Segmented tab control. `full` stretches it across the mobile sub-bar with visible labels.
+function NavTabs({ active, onChange, full = false }) {
+  return (
+    <div className={`${full ? 'flex w-full' : 'inline-flex'} h-9 items-center rounded-xl bg-black/[0.05] dark:bg-white/[0.06] p-1 border border-black/[0.04] dark:border-white/[0.08] shadow-inner gap-0.5`}>
+      {NAV_TABS.map(({ key, label, title, Icon }) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onChange(key)}
+          title={title}
+          aria-label={title}
+          aria-current={active === key ? 'page' : undefined}
+          className={`h-7 ${full ? 'flex-1 justify-center px-1' : 'px-2.5 sm:px-3'} flex items-center gap-1.5 rounded-lg text-[12px] transition-all whitespace-nowrap cursor-pointer ${
+            active === key
+              ? 'bg-white dark:bg-[#252529] font-semibold text-[#1d1d1f] dark:text-white shadow-[0_1px_3px_rgba(0,0,0,0.1),0_0.5px_1px_rgba(0,0,0,0.06)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.5)]'
+              : 'text-muted dark:text-[#a1a1aa] font-medium hover:text-[#1d1d1f] dark:hover:text-white hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+          }`}
+        >
+          <Icon size={13} className={`shrink-0 ${active === key ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'}`} />
+          <span className={full ? 'hidden min-[420px]:inline truncate text-[11px]' : 'hidden xl:inline'}>{label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// Status bar pinned under the workspace: platform health on the left, run context on the right.
+function AppFooter({ apiOnline, runs, run, activeAgents, isDarkMode, onToggleTheme }) {
+  const awaiting = runs.filter((r) => r.awaiting).length
+  const chainOk = run?.verified !== false
+  return (
+    <footer className="flex h-7 shrink-0 items-center justify-between gap-3 border-t border-black/[0.08] dark:border-white/[0.08] bg-white dark:bg-[#0b0b0d] px-3 sm:px-4 font-mono text-[10.5px] text-muted dark:text-[#a1a1aa] select-none">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="flex items-center gap-1.5 shrink-0" title={apiOnline ? 'GateKeep API reachable' : 'GateKeep API unreachable'}>
+          <span className={`h-1.5 w-1.5 rounded-full ${apiOnline ? 'bg-[#34c759]' : 'bg-[#ff3b30]'}`} />
+          <span className={apiOnline ? '' : 'text-red'}>{apiOnline ? 'API connected' : 'API offline'}</span>
+        </span>
+        <span className="hidden sm:inline text-faint dark:text-[#8e8e93]">·</span>
+        <span className="hidden sm:inline shrink-0 tabnum">
+          {runs.length} {runs.length === 1 ? 'run' : 'runs'}
+          {awaiting > 0 && <span className="text-[#8f4700] dark:text-[#ff9f0a]"> · {awaiting} awaiting</span>}
+        </span>
+        <span className="hidden md:inline text-faint dark:text-[#8e8e93]">·</span>
+        <span className="hidden md:inline shrink-0 tabnum">{activeAgents} active {activeAgents === 1 ? 'agent' : 'agents'}</span>
+      </div>
+      <div className="flex min-w-0 items-center gap-3">
+        {run && (
+          <span
+            className={`hidden min-[480px]:flex items-center gap-1 shrink-0 ${chainOk ? 'text-[#17692e] dark:text-[#34c759]' : 'text-red'}`}
+            title={`Audit chain for ${run.id}`}
+          >
+            {chainOk ? <ShieldCheck size={11} /> : <ShieldAlert size={11} />}
+            <span>{chainOk ? 'Chain verified' : 'Chain broken'}</span>
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onToggleTheme}
+          className="flex items-center gap-1 rounded px-1 text-muted dark:text-[#a1a1aa] hover:text-ink dark:hover:text-white transition-colors cursor-pointer"
+          title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+        >
+          {isDarkMode ? <Moon size={11} /> : <Sun size={11} />}
+          <span>{isDarkMode ? 'Dark' : 'Light'}</span>
+        </button>
+        <span className="hidden sm:inline text-faint dark:text-[#8e8e93]">GateKeep v0.1.0</span>
+      </div>
+    </footer>
+  )
+}
+
 export default function App() {
   const [runs, setRuns] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [runTab, setRunTab] = useState(() => {
     try {
+      const urlTab = new URLSearchParams(window.location.search).get('tab')
+      if (['overview', 'specs', 'code', 'tests', 'audit'].includes(urlTab)) return urlTab
       return localStorage.getItem('gatekeep_active_tab') || 'overview'
     } catch {
       return 'overview'
@@ -37,6 +117,56 @@ export default function App() {
   const [err, setErr] = useState(null)
   const [mcpSessions, setMcpSessions] = useState([])
   const [mcpStats, setMcpStats] = useState(null)
+  const [apiOnline, setApiOnline] = useState(true)
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    try {
+      if (typeof document !== 'undefined') {
+        const saved = localStorage.getItem('gatekeep_theme')
+        if (saved === 'dark') return true
+        if (saved === 'light') return false
+        if (document.documentElement.classList.contains('dark')) return true
+      }
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+    } catch {
+      return false
+    }
+  })
+
+  useEffect(() => {
+    try {
+      if (isDarkMode) {
+        document.documentElement.classList.add('dark')
+        document.body.classList.add('dark')
+        document.documentElement.style.colorScheme = 'dark'
+      } else {
+        document.documentElement.classList.remove('dark')
+        document.body.classList.remove('dark')
+        document.documentElement.style.colorScheme = 'light'
+      }
+    } catch {}
+  }, [isDarkMode])
+
+  useEffect(() => {
+    try {
+      const media = window.matchMedia('(prefers-color-scheme: dark)')
+      const listener = (e) => {
+        const saved = localStorage.getItem('gatekeep_theme')
+        if (!saved) {
+          setIsDarkMode(e.matches)
+        }
+      }
+      if (media?.addEventListener) {
+        media.addEventListener('change', listener)
+        return () => media.removeEventListener('change', listener)
+      }
+    } catch {}
+  }, [])
+
+  // Persist only on an explicit choice; until then the app follows the OS setting.
+  const toggleTheme = () => setIsDarkMode((prev) => {
+    try { localStorage.setItem('gatekeep_theme', prev ? 'light' : 'dark') } catch {}
+    return !prev
+  })
 
   const handleTabChange = useCallback((tab) => {
     setRunTab(tab)
@@ -50,8 +180,15 @@ export default function App() {
       const list = await api.listRuns()
       const full = await Promise.all(list.map((l) => api.getRun(l.id)))
       setRuns(full.map(withExtras))
-      setSelectedId((prev) => prev || full.find((r) => r.awaiting)?.id || full[0]?.id || null)
+      setSelectedId((prev) => {
+        const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+        const urlRunId = urlParams?.get('run')
+        if (urlRunId && full.some((r) => r.id === urlRunId)) return urlRunId
+        if (prev && full.some((r) => r.id === prev)) return prev
+        return full.find((r) => r.awaiting)?.id || full[0]?.id || null
+      })
       setErr(null)
+      setApiOnline(true)
       // Fetch MCP session data (graceful — may 404 if schema not applied yet)
       try {
         const [sessions, stats] = await Promise.all([api.listMcpSessions(), api.getMcpStats()])
@@ -61,6 +198,7 @@ export default function App() {
       return full
     } catch (e) {
       console.warn('Backend unavailable:', e.message)
+      setApiOnline(false)
       setRuns([])
       setSelectedId(null)
       return []
@@ -294,183 +432,131 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-[100dvh] w-[100dvw] flex-col overflow-hidden bg-white select-none font-sans">
-      {/* ========================================================= */}
-      {/* UNIFIED 3-ZONE APPLICATION HEADER (Height: 52px)          */}
-      {/* Matches gatekeep_code_review_ide demo image               */}
-      {/* ========================================================= */}
+    <div className="flex h-[100dvh] w-[100dvw] flex-col overflow-hidden bg-canvas select-none font-sans transition-colors duration-150">
       {/* ========================================================= */}
       {/* UNIFIED 3-ZONE APPLICATION HEADER (Height: 52px)          */}
       {/* 3-Column Grid guarantees zero text collision / overlap    */}
       {/* ========================================================= */}
-      <header className="grid grid-cols-[1fr_auto_1fr] h-[52px] shrink-0 items-center border-b border-black/[0.08] bg-white px-4 select-none z-30 shadow-2xs gap-3">
+      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-black/[0.08] dark:border-white/[0.08] bg-white dark:bg-[#0b0b0d] px-3 sm:px-4 select-none z-30 shadow-2xs gap-2 sm:gap-4">
         {/* ZONE 1 (Left): Geometric Logo + Active Run Switcher Capsule */}
-        <div className="flex items-center gap-2.5 min-w-0 overflow-hidden">
+        <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0">
           {/* GateKeep Geometric Wordmark */}
-          <div className="flex items-center gap-2 shrink-0 cursor-pointer" onClick={() => setRunTab('overview')}>
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-black text-white font-bold text-[13px] tracking-tight shadow-xs">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 cursor-pointer" onClick={() => setRunTab('overview')}>
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-black text-white dark:bg-white dark:text-black font-bold text-[13px] tracking-tight shadow-xs">
               G
             </span>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[14px] font-bold tracking-tight text-ink">GateKeep</span>
-              <span className="rounded bg-black/[0.05] px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-faint">
+            <div className="flex items-center gap-1">
+              <span className="text-[14px] font-bold tracking-tight text-ink dark:text-[#f5f5f7] hidden sm:inline">GateKeep</span>
+              <span className="rounded bg-black/[0.05] dark:bg-white/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-faint dark:text-[#a1a1aa] hidden lg:inline">
                 PROD
               </span>
             </div>
           </div>
 
-          <div className="h-4 w-px bg-black/[0.1] mx-0.5 shrink-0 hidden sm:block" />
+          <div className="h-4 w-px bg-black/[0.1] dark:bg-white/[0.12] mx-0.5 shrink-0 hidden md:block" />
 
           {/* Active Run Status Capsule with Interactive Switcher */}
           <div className="relative min-w-0 shrink-0">
             <button
               type="button"
               onClick={() => setRunMenu((v) => !v)}
-              className="flex h-8 items-center gap-2 rounded-xl bg-black/[0.03] hover:bg-black/[0.06] border border-black/[0.06] px-2.5 text-[12px] font-semibold transition-colors shadow-2xs"
+              className="flex h-8 items-center gap-1.5 sm:gap-2 rounded-xl bg-black/[0.03] hover:bg-black/[0.06] border border-black/[0.06] dark:bg-white/[0.06] dark:hover:bg-white/[0.1] dark:border-white/[0.12] px-2 sm:px-2.5 text-[12px] font-semibold text-ink dark:text-[#f5f5f7] transition-colors shadow-2xs cursor-pointer"
             >
               <span className={`h-2 w-2 rounded-full shrink-0 ${
                 run?.awaiting ? 'bg-[#ff9500] animate-pulse' : run?.status === 'approved' ? 'bg-[#34c759]' : run ? 'bg-[#0071e3]' : 'bg-muted'
               }`} />
-              <span className="font-mono text-ink">{run?.id || 'No Runs'}</span>
+              <span className="font-mono text-ink dark:text-[#f5f5f7] text-[11.5px] sm:text-[12px] max-w-[90px] sm:max-w-[150px] truncate">{run?.id || 'No Runs'}</span>
               {run && (
                 <>
-                  <span className="text-muted hidden md:inline">·</span>
-                  <span className="text-muted hidden md:inline font-normal truncate max-w-[120px]">
+                  <span className="text-muted dark:text-[#8e8e93] hidden 2xl:inline">·</span>
+                  <span className="text-muted dark:text-[#a1a1aa] hidden 2xl:inline font-normal truncate max-w-[130px]">
                     {run.awaiting ? `Awaiting ${run.gate || 'Gate'}` : run.status === 'approved' ? 'Approved' : run.status}
                   </span>
                 </>
               )}
-              <ChevronDown size={11} className="text-faint ml-0.5 shrink-0" />
+              <ChevronDown size={11} className="text-faint dark:text-[#a1a1aa] ml-0.5 shrink-0" />
             </button>
 
             {runMenu && (
-              <div className="absolute left-0 top-full z-50 mt-1.5 w-80 overflow-hidden rounded-2xl border border-black/[0.08] bg-white/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise">
-                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
-                  Select Workflow Run
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setRunMenu(false)}
+                />
+                <div className="absolute left-0 top-full z-50 mt-1.5 w-80 overflow-hidden rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white/95 dark:bg-[#18181b]/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise">
+                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint dark:text-[#a1a1aa]">
+                    Select Workflow Run
+                  </div>
+                  {runs.map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => { setSelectedId(r.id); setRunMenu(false) }}
+                      className={`flex w-full flex-col rounded-xl px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors cursor-pointer ${
+                        r.id === run?.id ? 'bg-accent/10 dark:bg-accent/20' : ''
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-[12px] font-semibold text-ink dark:text-white">{r.id}</span>
+                        <span className={`font-mono text-[10.5px] font-semibold ${
+                          r.awaiting ? 'text-[#ff9500] dark:text-[#ff9f0a]' : r.status === 'approved' ? 'text-[#34c759]' : 'text-faint dark:text-[#8e8e93]'
+                        }`}>
+                          {r.awaiting ? 'Awaiting Gate' : r.status}
+                        </span>
+                      </div>
+                      <span className="truncate text-[11.5px] text-muted dark:text-[#a1a1aa] mt-0.5">{r.brief}</span>
+                    </button>
+                  ))}
                 </div>
-                {runs.map((r) => (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => { setSelectedId(r.id); setRunMenu(false) }}
-                    className={`flex w-full flex-col rounded-xl px-3 py-2 text-left hover:bg-black/[0.04] transition-colors ${
-                      r.id === run.id ? 'bg-accent/10' : ''
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-[12px] font-semibold text-ink">{r.id}</span>
-                      <span className={`font-mono text-[10.5px] font-semibold ${
-                        r.awaiting ? 'text-[#ff9500]' : r.status === 'approved' ? 'text-[#34c759]' : 'text-faint'
-                      }`}>
-                        {r.awaiting ? 'Awaiting Gate' : r.status}
-                      </span>
-                    </div>
-                    <span className="truncate text-[11.5px] text-muted mt-0.5">{r.brief}</span>
-                  </button>
-                ))}
-              </div>
+              </>
             )}
           </div>
         </div>
 
-        {/* ZONE 2 (Center): Segmented Navigation Pill (In-Flow, Zero Overlap) */}
-        <div className="flex items-center justify-center shrink-0">
-          <div className="inline-flex h-9 items-center rounded-xl bg-black/[0.05] p-1 border border-black/[0.04] shadow-inner">
-            <button
-              type="button"
-              onClick={() => handleTabChange('overview')}
-              className={`h-7 px-3 flex items-center rounded-lg text-[12px] transition-all whitespace-nowrap ${
-                runTab === 'overview'
-                  ? 'bg-white font-semibold text-[#1d1d1f] shadow-[0_1px_3px_rgba(0,0,0,0.1),0_0.5px_1px_rgba(0,0,0,0.06)]'
-                  : 'text-[#6e6e73] font-medium hover:text-[#1d1d1f]'
-              }`}
-            >
-              Overview
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabChange('specs')}
-              className={`h-7 px-3 flex items-center rounded-lg text-[12px] transition-all whitespace-nowrap ${
-                runTab === 'specs'
-                  ? 'bg-white font-semibold text-[#1d1d1f] shadow-[0_1px_3px_rgba(0,0,0,0.1),0_0.5px_1px_rgba(0,0,0,0.06)]'
-                  : 'text-[#6e6e73] font-medium hover:text-[#1d1d1f]'
-              }`}
-            >
-              Specs &amp; Design
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabChange('code')}
-              className={`h-7 px-3 flex items-center rounded-lg text-[12px] transition-all whitespace-nowrap ${
-                runTab === 'code'
-                  ? 'bg-white font-semibold text-[#1d1d1f] shadow-[0_1px_3px_rgba(0,0,0,0.1),0_0.5px_1px_rgba(0,0,0,0.06)]'
-                  : 'text-[#6e6e73] font-medium hover:text-[#1d1d1f]'
-              }`}
-            >
-              Code Review
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabChange('tests')}
-              className={`h-7 px-3 flex items-center rounded-lg text-[12px] transition-all whitespace-nowrap ${
-                runTab === 'tests'
-                  ? 'bg-white font-semibold text-[#1d1d1f] shadow-[0_1px_3px_rgba(0,0,0,0.1),0_0.5px_1px_rgba(0,0,0,0.06)]'
-                  : 'text-[#6e6e73] font-medium hover:text-[#1d1d1f]'
-              }`}
-            >
-              Test Results
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleTabChange('audit')}
-              className={`h-7 px-3 flex items-center rounded-lg text-[12px] transition-all whitespace-nowrap ${
-                runTab === 'audit'
-                  ? 'bg-white font-semibold text-[#1d1d1f] shadow-[0_1px_3px_rgba(0,0,0,0.1),0_0.5px_1px_rgba(0,0,0,0.06)]'
-                  : 'text-[#6e6e73] font-medium hover:text-[#1d1d1f]'
-              }`}
-            >
-              Audit Chain
-            </button>
-          </div>
+        {/* ZONE 2 (Center): Segmented Navigation Pill (In-Flow, Zero Overlap). Phones use the sub-bar below. */}
+        <div className="hidden md:flex items-center justify-center shrink-0">
+          <NavTabs active={runTab} onChange={handleTabChange} />
         </div>
 
         {/* ZONE 3 (Right): Reviewer Role Popover + New Run + Primary Action */}
-        <div className="flex items-center justify-end gap-2 min-w-0">
+        <div className="flex items-center justify-end gap-1.5 sm:gap-2 min-w-0 shrink-0">
           {/* Acting as (Role Switcher Popover) */}
           <div className="relative shrink-0">
             <button
               type="button"
               onClick={() => setRoleMenuOpen((v) => !v)}
-              className="flex h-8 items-center gap-1.5 rounded-xl border border-black/[0.08] bg-black/[0.03] px-2.5 text-[12px] font-medium text-ink hover:bg-black/[0.06] transition-colors"
-              title="Switch acting reviewer role"
+              className="flex h-8 items-center gap-1.5 rounded-xl border border-black/[0.08] dark:border-white/[0.12] bg-black/[0.03] dark:bg-white/[0.06] hover:bg-black/[0.06] dark:hover:bg-white/[0.1] px-2 sm:px-2.5 text-[12px] font-medium text-ink dark:text-[#f5f5f7] transition-colors cursor-pointer"
+              title={`Reviewer role: ${reviewerRole} (click to switch)`}
             >
-              <span className="text-[11px] text-[#86868b] hidden 2xl:inline">Reviewer Role:</span>
-              <span className="font-semibold text-[#1d1d1f]">{reviewerRole}</span>
-              <ChevronDown size={11} className="text-[#86868b]" />
+              <span className="text-[11px] text-faint dark:text-[#a1a1aa] hidden lg:inline xl:hidden 2xl:inline">Reviewer Role:</span>
+              <span className="font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]">{reviewerRole}</span>
+              <ChevronDown size={11} className="text-faint dark:text-[#a1a1aa] hidden sm:block" />
             </button>
             {roleMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1.5 w-48 rounded-2xl border border-black/[0.08] bg-white/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise">
-                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">
-                  Active Reviewer Identity
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setRoleMenuOpen(false)}
+                />
+                <div className="absolute right-0 top-full z-50 mt-1.5 w-48 rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white/95 dark:bg-[#18181b]/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise">
+                  <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint dark:text-[#a1a1aa]">
+                    Active Reviewer Identity
+                  </div>
+                  {['Engineer', 'Planner', 'Requester'].map((role) => (
+                    <button
+                      key={role}
+                      type="button"
+                      onClick={() => { setReviewerRole(role); setRoleMenuOpen(false) }}
+                      className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer ${
+                        reviewerRole === role ? 'font-semibold text-accent dark:text-[#4da3ff]' : 'text-ink dark:text-[#f5f5f7]'
+                      }`}
+                    >
+                      <span>{role}</span>
+                      {reviewerRole === role && <Check size={12} strokeWidth={2.5} />}
+                    </button>
+                  ))}
                 </div>
-                {['Engineer', 'Planner', 'Requester'].map((role) => (
-                  <button
-                    key={role}
-                    type="button"
-                    onClick={() => { setReviewerRole(role); setRoleMenuOpen(false) }}
-                    className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors hover:bg-black/[0.04] ${
-                      reviewerRole === role ? 'font-semibold text-accent' : 'text-ink'
-                    }`}
-                  >
-                    <span>{role}</span>
-                    {reviewerRole === role && <Check size={12} strokeWidth={2.5} />}
-                  </button>
-                ))}
-              </div>
+              </>
             )}
           </div>
 
@@ -478,11 +564,12 @@ export default function App() {
           <button
             type="button"
             onClick={() => setNewRun({ brief: '', repo: '', branch: '' })}
-            className="hidden sm:inline-flex h-8 items-center gap-1.5 rounded-xl border border-black/[0.08] bg-black/[0.03] hover:bg-black/[0.06] px-2.5 text-[12px] font-medium text-ink transition-all active:scale-[0.98] shrink-0"
+            className="hidden sm:inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-xl border border-black/[0.08] dark:border-white/[0.12] bg-black/[0.03] dark:bg-white/[0.06] hover:bg-black/[0.06] dark:hover:bg-white/[0.1] px-2 lg:px-2.5 xl:px-2 2xl:px-2.5 text-[12px] font-medium text-ink dark:text-[#f5f5f7] transition-all active:scale-[0.98] shrink-0 cursor-pointer"
             title="Launch new agent workflow run"
+            aria-label="New run"
           >
-            <Plus size={13} className="text-[#86868b]" />
-            <span>New Run</span>
+            <Plus size={13} className="text-faint dark:text-[#a1a1aa]" />
+            <span className="hidden lg:inline xl:hidden 2xl:inline">New Run</span>
           </button>
 
           {/* Primary Action Button (Approve Gate ↗) */}
@@ -490,9 +577,32 @@ export default function App() {
             type="button"
             disabled={!canAct}
             onClick={() => decide('approve')}
-            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl bg-[#0071e3] hover:bg-[#0077ed] px-3.5 text-[12.5px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap"
+            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl bg-[#0071e3] hover:bg-[#0077ed] px-2.5 sm:px-3.5 text-[12.5px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap cursor-pointer"
+            title={canAct ? 'Approve the current gate' : run?.status === 'approved' ? 'This run is approved' : 'Nothing to approve right now'}
           >
-            <span>{canAct ? 'Approve Gate ↗' : run?.status === 'approved' ? 'Approved ✓' : 'Primary Action'}</span>
+            <Check size={14} strokeWidth={2.5} className="min-[360px]:hidden" aria-hidden="true" />
+            <span className="sr-only min-[360px]:not-sr-only lg:hidden">{run?.status === 'approved' && !canAct ? 'Approved' : 'Approve'}</span>
+            <span className="hidden lg:inline">{canAct ? 'Approve Gate ↗' : run?.status === 'approved' ? 'Approved ✓' : 'Approve Gate'}</span>
+          </button>
+
+          {/* Dark / Light Theme Toggle */}
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="flex h-8 w-8 items-center justify-center rounded-xl border border-black/[0.08] dark:border-white/[0.12] bg-black/[0.03] dark:bg-white/[0.06] hover:bg-black/[0.06] dark:hover:bg-white/[0.1] text-muted dark:text-[#a1a1aa] hover:text-ink dark:hover:text-white transition-colors cursor-pointer shrink-0"
+            title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            aria-label="Toggle Dark / Light Theme"
+          >
+            <span
+              className={`flex items-center justify-center transition-transform duration-200 ease-out ${isDarkMode ? 'rotate-[360deg]' : 'rotate-0'}`}
+              aria-hidden="true"
+            >
+              {isDarkMode ? (
+                <Sun size={14} className="text-[#ff9500]" />
+              ) : (
+                <Moon size={14} className="text-muted" />
+              )}
+            </span>
           </button>
 
           {/* More Actions Menu */}
@@ -500,42 +610,52 @@ export default function App() {
             <button
               type="button"
               onClick={() => setMoreMenuOpen((v) => !v)}
-              className="flex h-8 w-8 items-center justify-center rounded-xl border border-black/[0.08] bg-black/[0.03] hover:bg-black/[0.06] text-muted hover:text-ink transition-colors"
+              className="flex h-8 w-8 items-center justify-center rounded-xl border border-black/[0.08] dark:border-white/[0.12] bg-black/[0.03] dark:bg-white/[0.06] hover:bg-black/[0.06] dark:hover:bg-white/[0.1] text-muted dark:text-[#a1a1aa] hover:text-ink dark:hover:text-white transition-colors cursor-pointer"
+              title="More actions"
+              aria-label="More actions"
             >
               <Ellipsis size={14} />
             </button>
             {moreMenuOpen && (
-              <div className="absolute right-0 top-full z-50 mt-1.5 w-52 rounded-2xl border border-black/[0.08] bg-white/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise text-[12px]">
+              <div className="absolute right-0 top-full z-50 mt-1.5 w-52 rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white/95 dark:bg-[#18181b]/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise text-[12px]">
+                <button
+                  type="button"
+                  onClick={() => { setNewRun({ brief: '', repo: '', branch: '' }); setMoreMenuOpen(false) }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink dark:text-[#f5f5f7] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] sm:hidden cursor-pointer"
+                >
+                  <Plus size={13} className="text-faint dark:text-[#a1a1aa]" />
+                  <span>New Run</span>
+                </button>
                 <button
                   type="button"
                   onClick={copyRunId}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink dark:text-[#f5f5f7] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer"
                 >
-                  <Copy size={13} className="text-faint" />
+                  <Copy size={13} className="text-faint dark:text-[#a1a1aa]" />
                   <span>Copy Run ID ({run?.id})</span>
                 </button>
                 <button
                   type="button"
                   onClick={copyBranchCheckout}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink dark:text-[#f5f5f7] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer"
                 >
-                  <GitBranch size={13} className="text-faint" />
+                  <GitBranch size={13} className="text-faint dark:text-[#a1a1aa]" />
                   <span>Copy Git Checkout</span>
                 </button>
                 <button
                   type="button"
                   onClick={downloadPatch}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink dark:text-[#f5f5f7] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer"
                 >
-                  <Download size={13} className="text-faint" />
+                  <Download size={13} className="text-faint dark:text-[#a1a1aa]" />
                   <span>Download .patch</span>
                 </button>
                 <button
                   type="button"
                   onClick={exportAuditJson}
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink hover:bg-black/[0.04]"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-ink dark:text-[#f5f5f7] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer"
                 >
-                  <FileText size={13} className="text-faint" />
+                  <FileText size={13} className="text-faint dark:text-[#a1a1aa]" />
                   <span>Export Audit JSON</span>
                 </button>
               </div>
@@ -544,10 +664,15 @@ export default function App() {
         </div>
       </header>
 
+      {/* Phone/tablet navigation sub-bar: the tabs move here so the header never collides. */}
+      <nav className="md:hidden shrink-0 border-b border-black/[0.06] dark:border-white/[0.08] bg-white dark:bg-[#0b0b0d] px-3 py-1.5" aria-label="Run views">
+        <NavTabs active={runTab} onChange={handleTabChange} full />
+      </nav>
+
       {/* ========================================================= */}
       {/* WORKSPACE CANVAS (Dedicated Dashboard per Route)          */}
       {/* ========================================================= */}
-      <main className="flex flex-1 min-w-0 h-[calc(100vh-52px)] overflow-hidden bg-white">
+      <main className="flex flex-1 min-w-0 min-h-0 overflow-hidden bg-canvas">
         {/* Route 1: Code Review (Full Width 3-Pane IDE Workspace) */}
         {runTab === 'code' && (
           <CodeReview
@@ -564,7 +689,7 @@ export default function App() {
 
         {/* Route 2: Overview (Governance & Pipeline Dashboard) */}
         {runTab === 'overview' && (
-          <div className="flex-1 h-full overflow-y-auto bg-[#fbfbfd]/70 p-6">
+          <div className="flex-1 h-full overflow-y-auto bg-canvas p-6">
             <div className="mx-auto max-w-6xl">
               <OverviewDashboardView
                 run={run}
@@ -584,7 +709,7 @@ export default function App() {
 
         {/* Route 3: Specs & Design */}
         {runTab === 'specs' && (
-          <div className="flex-1 h-full overflow-y-auto bg-white p-6">
+          <div className="flex-1 h-full overflow-y-auto bg-canvas p-6">
             <div className="mx-auto max-w-5xl">
               <SpecsDesignView
                 run={run}
@@ -598,7 +723,7 @@ export default function App() {
 
         {/* Route 4: Test Results */}
         {runTab === 'tests' && (
-          <div className="flex-1 h-full overflow-y-auto bg-[#fbfbfd]/70 p-6">
+          <div className="flex-1 h-full overflow-y-auto bg-canvas p-6">
             <div className="mx-auto max-w-5xl">
               <TestResultsView run={run} onRerunTests={startPipeline} />
             </div>
@@ -607,13 +732,22 @@ export default function App() {
 
         {/* Route 5: Audit Chain */}
         {runTab === 'audit' && (
-          <div className="flex-1 h-full overflow-y-auto bg-[#fbfbfd]/70 p-6">
+          <div className="flex-1 h-full overflow-y-auto bg-canvas p-6">
             <div className="mx-auto max-w-5xl">
               <AuditLogView runs={runs} activeRun={run} onOpenRun={openRun} onTamper={doTamper} onRefresh={refresh} />
             </div>
           </div>
         )}
       </main>
+
+      <AppFooter
+        apiOnline={apiOnline}
+        runs={runs}
+        run={run}
+        activeAgents={mcpStats?.active_sessions ?? mcpSessions.filter((s) => s.status === 'active').length}
+        isDarkMode={isDarkMode}
+        onToggleTheme={toggleTheme}
+      />
 
       {/* Rework Modal for requesting changes with reviewer feedback */}
       <ReworkModal
@@ -626,20 +760,20 @@ export default function App() {
 
       {/* New Run Modal */}
       {newRun && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onClick={() => setNewRun(null)}>
-          <div className="w-full max-w-md rounded-2xl border border-black/[0.08] bg-white p-6 shadow-pop animate-rise" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/60 p-4 backdrop-blur-sm" onClick={() => setNewRun(null)}>
+          <div className="w-full max-w-md rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white dark:bg-[#18181b] p-6 shadow-pop animate-rise" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
-              <h2 className="text-[16px] font-semibold text-ink">Launch New Agent Workflow Run</h2>
-              <button onClick={() => setNewRun(null)} className="rounded-lg p-1 text-muted hover:bg-black/[0.05] hover:text-ink">
+              <h2 className="text-[16px] font-semibold text-ink dark:text-white">Launch New Agent Workflow Run</h2>
+              <button onClick={() => setNewRun(null)} className="rounded-lg p-1 text-muted hover:bg-black/[0.05] dark:hover:bg-white/[0.08] hover:text-ink dark:hover:text-white cursor-pointer">
                 <X size={16} />
               </button>
             </div>
-            <p className="mt-1 text-[13px] text-muted">
+            <p className="mt-1 text-[13px] text-muted dark:text-[#a1a1aa]">
               Specify your engineering task. The multi-agent pipeline will generate specs, write the implementation, and run tests in container isolation.
             </p>
 
             <div className="mt-4 flex items-center gap-2">
-              <span className="text-[11px] font-medium text-faint">Presets:</span>
+              <span className="text-[11px] font-medium text-faint dark:text-[#8e8e93]">Presets:</span>
               <button
                 type="button"
                 onClick={() => setNewRun({
@@ -647,7 +781,7 @@ export default function App() {
                   repo: "commerce-core",
                   branch: "feat/webhook-throttle"
                 })}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.08] bg-black/[0.025] px-2.5 py-1 text-[11px] font-medium text-ink transition-colors hover:border-accent hover:text-accent"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.08] dark:border-white/[0.1] bg-black/[0.025] dark:bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium text-ink dark:text-[#f5f5f7] transition-colors hover:border-accent hover:text-accent cursor-pointer"
               >
                 <Zap size={12} className="text-amber" />
                 <span>Webhook Rate Limiting</span>
@@ -656,33 +790,33 @@ export default function App() {
 
             <div className="mt-4 flex flex-col gap-3">
               <div>
-                <label className="text-[12px] font-medium text-muted">Brief <span className="text-red">*</span></label>
+                <label className="text-[12px] font-medium text-muted dark:text-[#a1a1aa]">Brief <span className="text-red">*</span></label>
                 <input
                   autoFocus
                   value={newRun.brief}
                   onChange={(e) => setNewRun({ ...newRun, brief: e.target.value })}
                   onKeyDown={(e) => e.key === 'Enter' && createRun()}
                   placeholder="e.g. Add rate limiting to the checkout webhook"
-                  className="mt-1 w-full rounded-xl border border-black/[0.1] bg-black/[0.02] px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:bg-white focus:ring-2 focus:ring-accent/20"
+                  className="mt-1 w-full rounded-xl border border-black/[0.1] dark:border-white/[0.12] bg-black/[0.02] dark:bg-white/[0.04] px-3 py-2 text-[13px] text-ink dark:text-white outline-none focus:border-accent focus:bg-white dark:focus:bg-[#121214] focus:ring-2 focus:ring-accent/20"
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[12px] font-medium text-muted">Repository</label>
+                  <label className="text-[12px] font-medium text-muted dark:text-[#a1a1aa]">Repository</label>
                   <input
                     value={newRun.repo}
                     onChange={(e) => setNewRun({ ...newRun, repo: e.target.value })}
                     placeholder="commerce-core"
-                    className="mt-1 w-full rounded-xl border border-black/[0.1] bg-black/[0.02] px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:bg-white focus:ring-2 focus:ring-accent/20"
+                    className="mt-1 w-full rounded-xl border border-black/[0.1] dark:border-white/[0.12] bg-black/[0.02] dark:bg-white/[0.04] px-3 py-2 text-[13px] text-ink dark:text-white outline-none focus:border-accent focus:bg-white dark:focus:bg-[#121214] focus:ring-2 focus:ring-accent/20"
                   />
                 </div>
                 <div>
-                  <label className="text-[12px] font-medium text-muted">Branch</label>
+                  <label className="text-[12px] font-medium text-muted dark:text-[#a1a1aa]">Branch</label>
                   <input
                     value={newRun.branch}
                     onChange={(e) => setNewRun({ ...newRun, branch: e.target.value })}
                     placeholder="feat/webhook-throttle"
-                    className="mt-1 w-full rounded-xl border border-black/[0.1] bg-black/[0.02] px-3 py-2 text-[13px] text-ink outline-none focus:border-accent focus:bg-white focus:ring-2 focus:ring-accent/20"
+                    className="mt-1 w-full rounded-xl border border-black/[0.1] dark:border-white/[0.12] bg-black/[0.02] dark:bg-white/[0.04] px-3 py-2 text-[13px] text-ink dark:text-white outline-none focus:border-accent focus:bg-white dark:focus:bg-[#121214] focus:ring-2 focus:ring-accent/20"
                   />
                 </div>
               </div>
@@ -692,14 +826,14 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setNewRun(null)}
-                className="rounded-xl border border-black/[0.08] px-4 py-2 text-[13px] font-medium text-ink hover:bg-black/[0.04]"
+                className="rounded-xl border border-black/[0.08] dark:border-white/[0.1] bg-transparent hover:bg-black/[0.04] dark:hover:bg-white/[0.06] px-4 py-2 text-[13px] font-medium text-ink dark:text-[#f5f5f7] cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={createRun}
-                className="rounded-xl bg-accent px-4 py-2 text-[13px] font-semibold text-white shadow-sm hover:bg-accent-hover active:scale-[0.98]"
+                className="rounded-xl bg-accent px-4 py-2 text-[13px] font-semibold text-white shadow-sm hover:bg-accent-hover active:scale-[0.98] cursor-pointer"
               >
                 Create Run
               </button>
@@ -710,7 +844,7 @@ export default function App() {
 
       {/* Floating Toast Notification */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl border border-black/[0.08] bg-white/95 px-4.5 py-2.5 text-[13px] font-medium text-ink shadow-pop backdrop-blur-xl animate-rise">
+        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white/95 dark:bg-[#1c1c1f]/95 px-4.5 py-2.5 text-[13px] font-medium text-ink dark:text-[#f5f5f7] shadow-pop backdrop-blur-xl animate-rise">
           {toast}
         </div>
       )}

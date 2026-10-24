@@ -75,7 +75,7 @@ export default function Sidebar({ active, onSelect, badges = {}, reviewerRole = 
 
       {/* Reviewer / User Identity */}
       <div className="border-t border-black/[0.06] bg-black/[0.015] p-3 flex items-center gap-2.5">
-        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-b from-[#e5e5ea] to-[#d1d1d6] font-bold text-ink text-[10.5px] shadow-xs shrink-0">
+        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-b from-[#e5e5ea] to-[#d1d1d6] dark:from-[#3a3a3c] dark:to-[#2c2c2e] font-bold text-ink text-[10.5px] shadow-xs shrink-0">
           {REVIEWER.initials}
         </span>
         <div className="min-w-0 flex-1 leading-tight">

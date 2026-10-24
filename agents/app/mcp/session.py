@@ -35,7 +35,7 @@ class SessionManager:
     """In-memory session store with backend validation and audit registration."""
 
     def __init__(self, base_url: str | None = None):
-        self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4000")
+        self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4040")
         self._sessions: dict[str, McpSession] = {}
 
     def create_session(

@@ -154,12 +154,14 @@ export async function getRun(db, runId) {
   }
 }
 
-export async function updateRun(db, runId, { status, gate } = {}) {
+export async function updateRun(db, runId, { status, gate, branch, commit } = {}) {
   const sets = []
   const vals = []
   let i = 1
   if (status !== undefined) { sets.push(`status = $${i++}`); vals.push(status) }
   if (gate !== undefined) { sets.push(`gate = $${i++}`); vals.push(gate) }
+  if (branch !== undefined) { sets.push(`branch = $${i++}`); vals.push(branch) }
+  if (commit !== undefined) { sets.push(`commit = $${i++}`); vals.push(commit) }
   if (!sets.length) return getRun(db, runId)
   sets.push('updated_at = now()')
   vals.push(runId)

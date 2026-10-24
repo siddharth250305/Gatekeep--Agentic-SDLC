@@ -1,19 +1,20 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  darkMode: 'class',
   content: ['./index.html', './src/**/*.{js,jsx}'],
   theme: {
     extend: {
       colors: {
-        // Apple HIG Color System (Refined Light Mode & Glass)
-        canvas: '#f5f5f7',          // Apple system light gray canvas
-        surface: '#ffffff',         // Apple pure white surface
-        'surface-glass': 'rgba(255, 255, 255, 0.82)',
-        sunken: '#f0f0f2',          // Apple subtle secondary background
-        line: 'rgba(0, 0, 0, 0.08)', // Apple hairline separator (0.5pt - 1px)
-        'line-strong': 'rgba(0, 0, 0, 0.16)',
-        ink: '#1d1d1f',             // Apple primary label (high contrast)
-        muted: '#6e6e73',           // Apple secondary label
-        faint: '#86868b',           // Apple tertiary label
+        // Apple HIG Color System (Themeable with CSS variables)
+        canvas: 'var(--color-canvas, #f5f5f7)',
+        surface: 'var(--color-surface, #ffffff)',
+        'surface-glass': 'var(--color-surface-glass, rgba(255, 255, 255, 0.82))',
+        sunken: 'var(--color-sunken, #f0f0f2)',
+        line: 'var(--color-line, rgba(0, 0, 0, 0.08))',
+        'line-strong': 'var(--color-line-strong, rgba(0, 0, 0, 0.16))',
+        ink: 'var(--color-ink, #1d1d1f)',
+        muted: 'var(--color-muted, #5c5c61)',
+        faint: 'var(--color-faint, #67676c)',
         // System Tints (HIG specifications)
         accent: '#0071e3',          // Apple System Blue
         'accent-hover': '#0077ed',

@@ -5,14 +5,52 @@
 @layer base {
   :root {
     color-scheme: light;
+    --color-canvas: #f5f5f7;
+    --color-surface: #ffffff;
+    --color-surface-glass: rgba(255, 255, 255, 0.82);
+    --color-sunken: #f0f0f2;
+    --color-line: rgba(0, 0, 0, 0.08);
+    --color-line-strong: rgba(0, 0, 0, 0.16);
+    --color-ink: #1d1d1f;
+    /* Secondary/tertiary labels tuned to clear WCAG AA (4.5:1) on canvas and sunken wells */
+    --color-muted: #5c5c61;
+    --color-faint: #67676c;
+    /* Accent as text: fills keep #0071e3 (white on it is 4.7:1); text needs a deeper blue on tints */
+    --color-accent-text: #005bb5;
+    /* Status tints as text, darkened from the fills so they clear AA on white and on their own -bg pills */
+    --color-red-text: #c00012;
+    --color-green-text: #17692e;
+    --color-amber-text: #8f4700;
+  }
+
+  .dark {
+    color-scheme: dark;
+    --color-canvas: #000000;
+    --color-surface: #141416;
+    --color-surface-glass: rgba(20, 20, 22, 0.85);
+    --color-sunken: #0c0c0e;
+    --color-line: rgba(255, 255, 255, 0.1);
+    --color-line-strong: rgba(255, 255, 255, 0.18);
+    --color-ink: #f5f5f7;
+    --color-muted: #a1a1aa;
+    --color-faint: #8e8e93;
+    --color-accent-text: #4da3ff;
+    --color-red-text: #ff453a;
+    --color-green-text: #34c759;
+    --color-amber-text: #ff9f0a;
   }
 
   html, body, #root {
     height: 100%;
   }
 
+  html {
+    background-color: var(--color-canvas, #f5f5f7);
+    color: var(--color-ink, #1d1d1f);
+  }
+
   body {
-    @apply bg-canvas text-ink font-sans;
+    @apply bg-canvas text-ink font-sans transition-colors duration-200;
     font-size: 13.5px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
@@ -46,14 +84,14 @@
   }
 
   ::selection {
-    background: rgba(0, 113, 227, 0.2);
-    color: #1d1d1f;
+    background: rgba(0, 113, 227, 0.25);
+    color: inherit;
   }
 
   /* Apple Accessible Focus Ring */
   :focus-visible {
     outline: none;
-    box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.35);
+    box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.4);
     border-radius: 6px;
   }
 
@@ -75,12 +113,19 @@
   *::-webkit-scrollbar-track {
     background: transparent;
   }
+
+  .dark *::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+  }
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
 }
 
 @layer components {
   /* Apple Card: continuous 16px curve, hairline border, ambient diffuse shadow */
   .card {
-    @apply rounded-2xl border border-black/[0.06] bg-surface transition-shadow duration-200;
+    @apply rounded-2xl border border-black/[0.06] bg-surface transition-colors duration-200;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
   }
 
@@ -125,3 +170,276 @@
     @apply font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-faint;
   }
 }
+
+
+/* ========================================================================= */
+/* APPLE DARK MODE ADAPTATIONS                                               */
+/* Deep blacks, subtle contrast surfaces, and refined translucency           */
+/*                                                                           */
+/* Layer 1 remaps the hardcoded light utilities used across the app.         */
+/* Layer 2 (html.dark .surface-*) pins specific surfaces and outranks it.    */
+/* ========================================================================= */
+
+html.dark,
+html.dark body,
+body.dark {
+  background-color: #000000 !important;
+  color: #f5f5f7 !important;
+}
+
+html:not(.dark),
+html:not(.dark) body {
+  background-color: #f5f5f7 !important;
+  color: #1d1d1f !important;
+}
+
+/* --- Cards & elevation -------------------------------------------------- */
+
+.dark .card {
+  background-color: #141416 !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.3) !important;
+}
+
+.dark .card-glass {
+  background-color: rgba(20, 20, 22, 0.88) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.04) !important;
+}
+
+.dark .shadow-pop {
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8), 0 6px 16px rgba(0, 0, 0, 0.5) !important;
+}
+
+.dark .shadow-card,
+.dark .hover\:shadow-card:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* --- Surface remaps ----------------------------------------------------- */
+
+.dark .bg-white,
+.dark .hover\:bg-white:hover {
+  background-color: #141416 !important;
+}
+
+.dark .bg-white\/95 {
+  background-color: rgba(22, 22, 25, 0.96) !important;
+}
+
+.dark .bg-white\/80 {
+  background-color: rgba(20, 20, 22, 0.85) !important;
+}
+
+.dark .bg-\[\#fbfbfd\],
+.dark .bg-\[\#fbfbfd\]\/70,
+.dark .bg-\[\#fbfbfd\]\/80 {
+  background-color: #000000 !important;
+}
+
+.dark .bg-\[\#f5f5f7\] {
+  background-color: #0b0b0d !important;
+}
+
+/* Floating menus & popovers */
+.dark .shadow-pop.bg-white,
+.dark .shadow-pop.bg-white\/95 {
+  background-color: #1c1c1f !important;
+}
+
+/* --- Hairlines ---------------------------------------------------------- */
+
+.dark .border-black\/\[0\.03\],
+.dark .border-black\/\[0\.04\],
+.dark .border-black\/\[0\.05\],
+.dark .border-black\/\[0\.06\],
+.dark .border-black\/\[0\.08\] {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .border-black\/\[0\.1\],
+.dark .border-black\/\[0\.12\] {
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+.dark .divide-black\/\[0\.04\] > :not([hidden]) ~ :not([hidden]),
+.dark .divide-black\/\[0\.05\] > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .ring-black\/\[0\.08\] {
+  --tw-ring-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* --- Translucent fills (pills, wells, hovers) --------------------------- */
+
+.dark .bg-black\/\[0\.015\],
+.dark .bg-black\/\[0\.02\],
+.dark .bg-black\/\[0\.025\],
+.dark .bg-black\/\[0\.03\],
+.dark .bg-black\/\[0\.035\],
+.dark .bg-black\/\[0\.04\],
+.dark .bg-black\/\[0\.05\] {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+.dark .bg-black\/\[0\.06\],
+.dark .bg-black\/\[0\.07\],
+.dark .bg-black\/\[0\.08\],
+.dark .bg-black\/\[0\.1\],
+.dark .bg-black\/10 {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .bg-black\/\[0\.18\] {
+  background-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+.dark .hover\:bg-black\/\[0\.02\]:hover,
+.dark .hover\:bg-black\/\[0\.03\]:hover,
+.dark .hover\:bg-black\/\[0\.035\]:hover {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+.dark .hover\:bg-black\/\[0\.04\]:hover,
+.dark .hover\:bg-black\/\[0\.05\]:hover,
+.dark .hover\:bg-black\/\[0\.06\]:hover,
+.dark .hover\:bg-black\/\[0\.07\]:hover,
+.dark .hover\:bg-black\/\[0\.08\]:hover {
+  background-color: rgba(255, 255, 255, 0.09) !important;
+}
+
+/* Modal scrims need to read against a black canvas */
+.dark .bg-black\/30,
+.dark .bg-black\/35,
+.dark .bg-black\/40 {
+  background-color: rgba(0, 0, 0, 0.6) !important;
+}
+
+/* --- Label & tint text remaps -------------------------------------------- */
+/* Light-mode tint text is darkened for contrast on white; on black it       */
+/* returns to the full-saturation system colors.                             */
+
+.dark .text-\[\#1d1d1f\] { color: #f5f5f7 !important; }
+.dark .text-\[\#6e6e73\] { color: #a1a1aa !important; }
+.dark .text-\[\#86868b\] { color: #8e8e93 !important; }
+.dark .text-\[\#17692e\] { color: #34c759 !important; }
+.dark .text-\[\#8f4700\] { color: #ff9f0a !important; }
+.dark .text-\[\#d70015\],
+.dark .text-\[\#c4161c\] { color: #ff453a !important; }
+.dark .text-\[\#0058b0\] { color: #409cff !important; }
+
+/* --- Controls ------------------------------------------------------------ */
+
+.dark .segmented-control {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .segmented-item-active {
+  background-color: #242428 !important;
+  color: #ffffff !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 0.5px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .btn-primary {
+  background-color: #0071e3;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0.5px rgba(255, 255, 255, 0.15);
+}
+
+.dark .btn-primary:hover:not(:disabled) {
+  background-color: #0077ed;
+}
+
+.dark .btn-secondary {
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #f5f5f7;
+}
+
+.dark .btn-secondary:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* --- Form fields ---------------------------------------------------------- */
+
+.dark input:not([type='checkbox']):not([type='radio']):not([type='range']),
+.dark textarea,
+.dark select {
+  background-color: #1a1a1d !important;
+  color: #f5f5f7 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+.dark input:not([type='checkbox']):not([type='radio']):not([type='range']):focus,
+.dark textarea:focus,
+.dark select:focus {
+  border-color: #0071e3 !important;
+}
+
+/* Borderless inputs embedded in an already-styled field (e.g. command palette) */
+.dark input.bg-transparent:not([type='checkbox']):not([type='radio']):not([type='range']) {
+  border-color: transparent !important;
+  background-color: transparent !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #76767c !important;
+}
+
+/* ========================================================================= */
+/* Layer 2: pinned surfaces (html.dark outranks the remaps above)            */
+/* ========================================================================= */
+
+/* Sunken chrome: IDE toolbar, tab strip, inset metric wells */
+html.dark .surface-ide-bar,
+html.dark .surface-sunken {
+  background-color: #0b0b0d !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* IDE side panels (explorer / inspector) */
+html.dark .surface-ide-panel {
+  background-color: #141416 !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Cards sitting on a #141416 panel step up one elevation */
+html.dark .surface-ide-panel .bg-white {
+  background-color: #1c1c1f !important;
+}
+
+/* Raised rows: table headers, note cards, file-plan cards */
+html.dark .surface-raised {
+  background-color: #1c1c1f !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Destructive / reject control (panel-scoped selector ties the panel card rule and wins on order) */
+html.dark .control-danger,
+html.dark .surface-ide-panel .control-danger {
+  background-color: rgba(255, 59, 48, 0.12) !important;
+  border-color: rgba(255, 59, 48, 0.25) !important;
+  color: #ff453a !important;
+}
+
+html.dark .control-danger:hover,
+html.dark .surface-ide-panel .control-danger:hover {
+  background-color: rgba(255, 59, 48, 0.18) !important;
+}
+
+/* ========================================================================= */
+/* Theme-aware text tokens (unlayered, so they beat Tailwind's text-*).      */
+/* Fills keep the brand tints (white on #0071e3 is 4.7:1); text uses the     */
+/* deeper light / brighter dark variants defined on :root and .dark.         */
+/* ========================================================================= */
+.text-accent,
+.hover\:text-accent:hover,
+.group:hover .group-hover\:text-accent {
+  color: var(--color-accent-text, #005bb5);
+}
+
+.text-red { color: var(--color-red-text, #c00012); }
+.text-green { color: var(--color-green-text, #17692e); }
+.text-amber { color: var(--color-amber-text, #8f4700); }

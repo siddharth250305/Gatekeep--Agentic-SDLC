@@ -1,5 +1,5 @@
-// Thin client for the GateKeep backend (Node/Express on :4000).
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000'
+// Thin client for the GateKeep backend (Node/Express on :4040).
+const BASE = import.meta.env.VITE_API_URL || 'http://localhost:4040'
 
 async function json(res) {
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText)

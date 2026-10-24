@@ -21,12 +21,12 @@ External LLM Client (Claude / Cursor / Other)
         ┌──────────────┴──────────────┐
         ▼                             ▼
 ┌───────────────┐             ┌───────────────┐
-│ Node API :4000│             │ Docker Sandbox│
+│ Node API :4040│             │ Docker Sandbox│
 │ PostgreSQL    │             │ Pytest        │
 │ SHA-256 Audit │             │ Workspaces    │
 └───────┬───────┘             └───────────────┘
         ▼
-GateKeep Dashboard (:5173)
+GateKeep Dashboard (:5180)
 ```
 
 ---
@@ -62,7 +62,7 @@ Add GateKeep to your `~/Library/Application Support/Claude/claude_desktop_config
       "args": ["-m", "app.mcp.server"],
       "cwd": "/Users/adeshsiddharth123/gatekeeper/agents",
       "env": {
-        "GATEKEEP_API": "http://localhost:4000"
+        "GATEKEEP_API": "http://localhost:4040"
       }
     }
   }

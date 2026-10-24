@@ -10,7 +10,7 @@
       "cwd": "/Users/adeshsiddharth123/gatekeeper/agents",
       "env": {
         "PYTHONPATH": "/Users/adeshsiddharth123/gatekeeper/agents",
-        "GATEKEEP_API": "http://localhost:4000"
+        "GATEKEEP_API": "http://localhost:4040"
       }
     }
   }

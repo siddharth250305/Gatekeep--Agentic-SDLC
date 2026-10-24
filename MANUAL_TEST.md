@@ -8,8 +8,8 @@ A click-by-click walkthrough to exercise the product live.
 ./scripts/dev.sh start
 ```
 
-Starts Postgres, the API (:4000), the agent service (:8077), and the UI (:5173).
-Open **http://localhost:5173**.
+Starts Postgres, the API (:4040), the agent service (:8077), and the UI (:5180).
+Open **http://localhost:5180**.
 
 Reset to fresh demo data anytime: `./scripts/dev.sh reset` (then refresh the page).
 Stop the app: `./scripts/dev.sh stop`. Stop the database too: `./scripts/dev.sh db-stop`.
@@ -56,7 +56,7 @@ docker compose -f backend/docker-compose.yml exec db \
   psql -U gatekeep -c "SELECT seq, event, left(hash,12) FROM audit_events WHERE run_id='RUN-0427' ORDER BY seq;"
 
 # verify the chain over HTTP:
-curl -XPOST localhost:4000/runs/RUN-0427/audit/verify
+curl -XPOST localhost:4040/runs/RUN-0427/audit/verify
 ```
 
 ## Notes / current limits

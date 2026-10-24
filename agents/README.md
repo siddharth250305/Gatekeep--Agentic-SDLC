@@ -26,12 +26,12 @@ python -m pytest -q        # 6 tests, offline (fake model + fake reporter)
 ## Run against the Node backend
 
 ```bash
-# 1. Node API on :4000 (backend/) must be running.
+# 1. Node API on :4040 (backend/) must be running.
 # 2. Start the agent service:
-GATEKEEP_API=http://localhost:4000 uvicorn app.main:app --port 8077
+GATEKEEP_API=http://localhost:4040 uvicorn app.main:app --port 8077
 
 # 3. Create a run in Node, then drive the pipeline:
-curl -XPOST localhost:4000/runs -H 'content-type: application/json' \
+curl -XPOST localhost:4040/runs -H 'content-type: application/json' \
   -d '{"runId":"RUN-9001","brief":"Add response caching"}'
 curl -XPOST localhost:8077/pipeline/RUN-9001/start  -d '{"brief":"Add response caching"}' -H 'content-type: application/json'
 curl -XPOST localhost:8077/pipeline/RUN-9001/resume -d '{"decision":"approve"}' -H 'content-type: application/json'   # Gate 1

@@ -19,13 +19,13 @@ function Node({ step }) {
   }
   if (step.state === 'active') {
     return (
-      <span className={`relative ${base} bg-amber text-white shadow-sm ring-4 ring-amber/25`}>
+      <span className={`relative ${base} bg-amber text-black shadow-sm ring-4 ring-amber/25`}>
         <span className="relative text-[11px] font-bold">{step.num}</span>
       </span>
     )
   }
   return (
-    <span className={`${base} bg-black/[0.04] text-faint ring-1 ring-black/[0.08]`}>
+    <span className={`${base} bg-black/[0.04] dark:bg-white/[0.08] text-faint dark:text-[#8e8e93] ring-1 ring-black/[0.08] dark:ring-white/[0.12]`}>
       <span className="text-[11px] font-medium">{step.num}</span>
     </span>
   )
@@ -46,7 +46,7 @@ export default function PipelineStepper({ steps, vertical = false }) {
               {!isLast && (
                 <div
                   className={`absolute left-[11px] top-[22px] bottom-0 w-[2px] transition-colors duration-200 ${
-                    steps[i + 1].state === 'pending' ? 'bg-black/[0.08]' : 'bg-[#34c759]/60'
+                    steps[i + 1].state === 'pending' ? 'bg-black/[0.08] dark:bg-white/[0.12]' : 'bg-[#34c759]/60'
                   }`}
                 />
               )}
@@ -61,13 +61,13 @@ export default function PipelineStepper({ steps, vertical = false }) {
                 <div className="flex items-center justify-between gap-1">
                   <span
                     className={`truncate text-[12.5px] font-semibold tracking-[-0.01em] ${
-                      step.state === 'pending' ? 'text-faint' : 'text-ink'
+                      step.state === 'pending' ? 'text-faint dark:text-[#8e8e93]' : 'text-ink dark:text-[#f5f5f7]'
                     }`}
                   >
                     {step.label}
                   </span>
                   {step.role && (
-                    <span className="font-mono text-[9.5px] text-faint uppercase tracking-wider">
+                    <span className="font-mono text-[9.5px] text-faint dark:text-[#8e8e93] uppercase tracking-wider">
                       {step.role}
                     </span>
                   )}
@@ -76,15 +76,15 @@ export default function PipelineStepper({ steps, vertical = false }) {
                   <span
                     className={`text-[11px] ${
                       isActive
-                        ? 'font-semibold text-accent'
+                        ? 'font-semibold text-accent dark:text-[#4da3ff]'
                         : isApproved
-                        ? 'text-[#1f7a37]'
-                        : 'text-faint'
+                        ? 'text-[#17692e] dark:text-[#34c759]'
+                        : 'text-faint dark:text-[#8e8e93]'
                     }`}
                   >
                     {step.status}
                   </span>
-                  {step.at && <span className="font-mono text-[10px] text-faint">· {step.at}</span>}
+                  {step.at && <span className="font-mono text-[10px] text-faint dark:text-[#8e8e93]">· {step.at}</span>}
                 </div>
               </div>
             </div>
@@ -104,7 +104,7 @@ export default function PipelineStepper({ steps, vertical = false }) {
               {i < steps.length - 1 && (
                 <span
                   className={`ml-2 h-[1.5px] flex-1 rounded-full transition-colors duration-200 ${
-                    steps[i + 1].state === 'pending' ? 'bg-black/[0.06]' : 'bg-black/[0.18]'
+                    steps[i + 1].state === 'pending' ? 'bg-black/[0.06] dark:bg-white/[0.08]' : 'bg-black/[0.18] dark:bg-white/[0.25]'
                   }`}
                 />
               )}
@@ -112,16 +112,16 @@ export default function PipelineStepper({ steps, vertical = false }) {
             <div className="mt-3.5 pr-4">
               <div
                 className={`truncate text-[13px] font-semibold tracking-[-0.01em] ${
-                  step.state === 'pending' ? 'text-faint' : 'text-ink'
+                  step.state === 'pending' ? 'text-faint dark:text-[#8e8e93]' : 'text-ink dark:text-[#f5f5f7]'
                 }`}
               >
                 {step.label}
               </div>
-              <div className="mt-0.5 font-mono text-[11px] text-faint">{step.role}</div>
+              <div className="mt-0.5 font-mono text-[11px] text-faint dark:text-[#8e8e93]">{step.role}</div>
               <StatusIndicator status={step.state} label={step.status} className="mt-1.5" />
-              {step.at && <div className="mt-1 font-mono text-[10.5px] text-faint">{step.at}</div>}
+              {step.at && <div className="mt-1 font-mono text-[10.5px] text-faint dark:text-[#8e8e93]">{step.at}</div>}
               {step.cost && (
-                <div className="mt-2 inline-flex items-center rounded-md bg-black/[0.03] px-2 py-0.5 font-mono text-[10.5px] tabnum text-muted">
+                <div className="mt-2 inline-flex items-center rounded-md bg-black/[0.03] dark:bg-white/[0.06] px-2 py-0.5 font-mono text-[10.5px] tabnum text-muted dark:text-[#a1a1aa]">
                   {step.cost} · {step.tokens} tok
                 </div>
               )}
