@@ -62,7 +62,24 @@ Only after Gate 2 is approved can the agent call `apply_patch` or `write_file`. 
 - When the agent calls `run_tests`, GateKeep runs pytest inside an ephemeral Docker container.
 - The container has networking disabled (`--network none`) and strict resource limits (512 MB RAM, 1 CPU).
 - GateKeep decides pass/fail from the process exit code, not from the AI's summary. A run only counts as **Passed** when pytest exits with 0 and at least one test ran. Docker being down, a timeout, or zero collected tests are reported as "Sandbox unavailable", "Timed out" or "No tests ran", never as a pass.
-- Once tests pass, the human reviewer inspects the side-by-side git diff in the web dashboard, leaves line-level comments if needed, and makes the final decision.
+- When the code is ready, the agent calls `request_approval`. The run moves from Code to **Gate 3**, a real human step for an Engineer. From then on the coding tools are closed.
+- At Gate 3 the reviewer inspects the side-by-side git diff in the web dashboard, leaves line-level comments if needed, and either approves (the run is **Done**) or sends the work back to **Code** or to **Design**. The person who asked for the run cannot give this final approval.
+
+### One state machine decides every step change
+The Node backend owns run state ([ADR 0001](docs/adr/0001-node-owns-run-state.md)). Every step change goes through one fixed table of allowed moves (`backend/src/runs/machine.js`):
+
+| From | Action | To | Who |
+|---|---|---|---|
+| Requirements | submit requirements | Gate 1 | Robot |
+| Gate 1 | approve / reject | Design / Requirements | Planner |
+| Design | submit design | Gate 2 | Robot |
+| Gate 2 | approve / reject | Code / Design | Engineer |
+| Code | request review | Gate 3 | Robot |
+| Gate 3 | approve / reject to code / reject to design | Done / Code / Design | Engineer (not the requester) |
+| Any active step | cancel | Cancelled | Planner or Engineer |
+| Done or Cancelled | anything | refused | Nobody |
+
+Any move not in the table is refused, and an unknown step refuses everything. An Admin may act for any human role. Each move locks the run, and writes exactly one audit entry with the logged-in name and the server's clock, in one database transaction. Pressing Approve twice, or a robot sending the same submission twice, never moves the run twice. There is no other way to change a run's step: the old `PATCH /runs/:id` route is gone, phase rows accept metrics only, and agents cannot write approval or step events into the audit log.
 
 ---
 
@@ -172,7 +189,7 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 | Test / Metric | Result | What it Means |
 | :--- | :--- | :--- |
-| **Automated Test Suite** | **146 Python + 62 Node passing** | Counts are collected test cases (parametrized cases count separately). Includes 2 real Docker sandbox tests and 4 locking/rollback tests that run against a real Postgres (`npm run test:pg`, and in CI). |
+| **Automated Test Suite** | **235 Python + 130 Node + 14 dashboard passing** | Counts are collected test cases (parametrized cases count separately). The 130 Node tests run on a real Postgres (`npm run test:pg`); 7 of them need real locking and are skipped under the in-memory `npm test`. Includes 2 real Docker sandbox tests. |
 | **Sensitive File Access** | **Blocked by name** | The MCP file tools refuse `.env`, `*.key`, `*.pem`, `id_rsa` and similar names, plus anything under `.git/`. Not yet covered: symlinks to secrets, secrets printed by test code, and some common names such as `id_ed25519` (see `drawback.md`). |
 | **Path Traversal Protection** | **Blocked** | `..` segments (with `/` or `\`) are rejected by the policy engine, and every resolved path must stay inside the run workspace. |
 | **Test Result Integrity** | **Exit code decides** | Pass/fail comes from the sandbox exit code and recorded counts, never from the LLM's own summary. The agent still writes its own tests, so a weak test can pass. |
@@ -187,7 +204,7 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 GateKeep is a student project and is not production-ready yet. The main gaps, explained in simple English in [`drawback.md`](drawback.md) with a fix plan in [`organised.md`](organised.md):
 
-- **Agent tokens can still change phase state directly.** Only logged-in reviewers can approve a gate, but the agent-side routes (`PUT /runs/:id/phases/:key`, `PATCH /runs/:id`) still accept raw state changes from an agent token, and Gate 3 is not a real phase in the state machine yet. Both are fixed in Milestone 2.
+- **Approval is not yet tied to an exact code version.** Gate 3 does not pin a diff hash or a test run ID, and an agent can still overwrite run artifacts (`PUT /runs/:id/artifacts`) outside a submission. This is Milestone 3 (B6, B7).
 - **Agents with their own tools can go around GateKeep.** Claude Code and Cursor keep their built-in Edit and Bash tools unless you restrict them.
 - **Audit log is tamper-evident, not tamper-proof** (plain SHA-256, no secret key).
 

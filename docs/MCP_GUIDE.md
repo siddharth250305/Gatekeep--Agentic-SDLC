@@ -107,15 +107,15 @@ claude mcp add gatekeep -- python3 -m app.mcp.server
 | `gatekeep_read_file` | All | Read file content (scrubbed of secrets, size-capped) |
 | `gatekeep_search_code` | All | Search workspace code for symbols or keywords |
 | `gatekeep_get_requirements_context` | `req` | Fetch existing requirements draft |
-| `gatekeep_submit_requirements` | `req` | Submit user stories and advance pipeline to **Gate 1 (Planner)** |
+| `gatekeep_submit_requirements` | `req` | Hand the requirements to the backend, which opens **Gate 1 (Planner)** if the move is allowed (refusals are returned, nothing is stored) |
 | `gatekeep_get_design_context` | `design` | Fetch approved requirements to draft technical design |
-| `gatekeep_submit_design` | `design` | Submit architectural design and advance pipeline to **Gate 2 (Engineer)** |
+| `gatekeep_submit_design` | `design` | Hand the design to the backend, which opens **Gate 2 (Engineer)** if the move is allowed |
 | `gatekeep_apply_patch` | `code` | Surgical find-and-replace modification |
 | `gatekeep_write_file` | `code` | Controlled file write/overwrite inside workspace |
 | `gatekeep_get_diff` | `code` | Extract git diff of unstaged/staged modifications |
 | `gatekeep_run_tests` | `code` | Trigger Pytest execution inside a no-network Docker container |
 | `gatekeep_get_test_results` | `code` | Fetch latest container execution output and assertion count |
-| `gatekeep_request_approval` | All | Request human review from the assigned role |
+| `gatekeep_request_approval` | `code` (no-op at `g3`) | Ask for code review: moves the run from Code to **Gate 3 (Engineer)**. Coding tools are closed at Gate 3 |
 | `gatekeep_get_approval_status` | All | Check whether the active gate has been approved or rework requested |
 | `gatekeep_get_audit_log` | All | Inspect the cryptographic SHA-256 hash chain of the current run |
 

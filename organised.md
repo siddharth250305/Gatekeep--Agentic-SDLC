@@ -110,7 +110,7 @@ Every item points back to its problem number in `drawback.md` (for example "see 
 | F1 | Remove all "demo mode" fake successes. Show a real error banner. | 5.1 | S | None | G2 |
 | F2 | Remove hardcoded test numbers. Show "No test run yet". Red when failed. | 5.2 | S | None | G2 |
 | F3 | Remove fake source code, the hardcoded "Line 42" rework message, and "a comment rejects the gate" behaviour. | 5.3 | S | None | G2 |
-| F4 | One clear gate banner on every page: which gate, who must act, Approve and Request changes buttons. | 5.5 | M | B3 | None |
+| F4 | One clear gate banner on every page: which gate, who must act, Approve and Request changes buttons. Also (found in the Milestone 2 browser check): disable Approve when the server would refuse it (role does not match the gate, or the requester at Gate 3), and show the right time on a step sent back for rework. | 5.5 | M | B3 | None |
 | F5 | Gate 3 three-column page: requirements with tests, code changes, design with "planned vs changed files". | 5.4 | L | B3, G2, I2, I3 | None |
 | F6 | Rework window lets the reviewer choose the step to send work back to. Only that step's comments are sent. | 5.6 | M | B4 | None |
 | F7 | Accessibility: dialogs, Esc key, labels, keyboard-reachable comment buttons, allow text selection. | 5.7 | M | G2 | None |
@@ -521,15 +521,15 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [x] G3 Remove duplicates
 
 **Milestone 2: Real checkpoints**
-- [ ] B2 State machine
-- [ ] B5 Only gates approvable
-- [ ] B3 Real Gate 3
-- [ ] B4 Rework loop
-- [ ] B1 Close back doors
-- [ ] B8 Safe to repeat
-- [x] A2 Identity from login (done early with A1: decisions and comments use the login)
-- [ ] E2 Server-only diary writes
-- [x] F9 Remove role dropdown (done early with A1)
+- [x] B2 State machine
+- [x] B5 Only gates approvable
+- [x] B3 Real Gate 3
+- [x] B4 Rework loop
+- [x] B1 Close back doors
+- [x] B8 Safe to repeat
+- [x] A2 Identity from login (done early with A1; re-checked with the Milestone 2 state machine and Gate 3)
+- [x] E2 Server-only diary writes
+- [x] F9 Remove role dropdown (done early with A1; re-checked in Milestone 2)
 
 **Milestone 3: Trustworthy evidence**
 - [ ] C2 JUnit results
