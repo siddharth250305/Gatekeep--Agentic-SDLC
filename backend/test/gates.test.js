@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createRun, decideGate, getRun, updateRun, upsertPhase } from '../src/runs/service.js'
+import { createRun, decideGate, getRun, robotAction } from '../src/runs/service.js'
 import { seed } from '../src/runs/seed.js'
 import { createApp } from '../src/app.js'
 import { freshDb as emptyDb } from './helpers/db.js'
 import { asReviewer } from './helpers/auth.js'
 
-// Fresh database with the demo runs loaded (RUN-0427 awaits the Engineer).
+// Fresh database with the demo runs loaded (RUN-0427 awaits the Engineer at Gate 3).
 async function freshDb() {
   const db = await emptyDb()
   await seed(db)
@@ -14,46 +14,51 @@ async function freshDb() {
 }
 
 
+const ADRT = { id: 900, username: 'adrt25', role: 'Engineer' }
+
 test('approve as the assigned role completes the run + appends audit', async () => {
   const db = await freshDb()
   const before = await getRun(db, 'RUN-0427')
   assert.equal(before.awaiting, true)
-  assert.equal(before.auditChain.length, 4)
+  assert.equal(before.step, 'g3')
 
-  const { run } = await decideGate(db, 'RUN-0427', { decision: 'approve', actor: 'adrt25', role: 'Engineer' })
+  const { run } = await decideGate(db, 'RUN-0427', { decision: 'approve', user: ADRT })
   assert.equal(run.status, 'approved')
+  assert.equal(run.step, 'done')
   assert.equal(run.awaiting, false)
   assert.equal(run.gate, null)
-  assert.equal(run.steps.find((s) => s.key === 'code').state, 'approved')
-  assert.equal(run.steps.find((s) => s.key === 'out').state, 'approved')
+  assert.equal(run.steps.find((s) => s.key === 'g3').state, 'approved')
+  assert.equal(run.steps.find((s) => s.key === 'done').state, 'approved')
   // a real audit event was appended, chain still verifies
-  assert.equal(run.auditChain.length, 5)
-  assert.equal(run.auditChain.at(-1).event, 'code.approved')
+  assert.equal(run.auditChain.length, before.auditChain.length + 1)
+  assert.equal(run.auditChain.at(-1).event, 'g3.approved')
   assert.equal(run.verified, true)
 })
 
-test('reject marks the run rejected + records feedback', async () => {
+test('reject at Gate 3 sends the work back to Code + records feedback', async () => {
   const db = await freshDb()
   const { run } = await decideGate(db, 'RUN-0427', {
-    decision: 'reject', actor: 'adrt25', role: 'Engineer', feedback: 'add tests for the 429 path',
+    decision: 'reject', target: 'code', user: ADRT, feedback: 'add tests for the 429 path',
   })
-  assert.equal(run.status, 'rejected')
-  assert.equal(run.steps.find((s) => s.key === 'code').state, 'rejected')
-  assert.equal(run.auditChain.at(-1).event, 'code.rejected')
+  assert.equal(run.status, 'running')
+  assert.equal(run.step, 'code')
+  assert.equal(run.steps.find((s) => s.key === 'code').state, 'active')
+  assert.equal(run.steps.find((s) => s.key === 'g3').state, 'rejected')
+  assert.equal(run.auditChain.at(-1).event, 'g3.rejected')
   assert.equal(run.auditChain.at(-1).payload.feedback, 'add tests for the 429 path')
 })
 
 test('wrong role cannot decide the gate', async () => {
   const db = await freshDb()
-  const out = await decideGate(db, 'RUN-0427', { decision: 'approve', role: 'Planner' })
+  const out = await decideGate(db, 'RUN-0427', { decision: 'approve', user: { id: 901, username: 'p', role: 'Planner' } })
   assert.equal(out.error, 'wrong_role')
   assert.equal(out.gate, 'Engineer')
 })
 
-test('no active gate returns an error (already rejected run)', async () => {
+test('a cancelled run cannot be decided', async () => {
   const db = await freshDb()
-  const out = await decideGate(db, 'RUN-0425', { decision: 'approve', role: 'Engineer' })
-  assert.equal(out.error, 'no_active_gate')
+  const out = await decideGate(db, 'RUN-0425', { decision: 'approve', user: ADRT })
+  assert.equal(out.error, 'finished')
 })
 
 test('HTTP decide broadcasts a run.updated event', async () => {
@@ -102,21 +107,21 @@ test('a repeated approve cannot push the run past an agent phase', async () => {
   // (here the agent's Design phase), so the run skipped straight to Gate 2.
   const db = await emptyDb()
   await createRun(db, { runId: 'RUN-R', brief: 'retry' })
-  await upsertPhase(db, 'RUN-R', 'req', { state: 'approved', status: 'Complete' })
-  await upsertPhase(db, 'RUN-R', 'g1', { state: 'active', status: 'Ready for review' })
-  await updateRun(db, 'RUN-R', { status: 'awaiting_gate', gate: 'Planner' })
+  await robotAction(db, 'RUN-R', 'submit_requirements', { agent: 'mcp' })
+  const planner = { id: 902, username: 'p', role: 'Planner' }
 
-  const first = await decideGate(db, 'RUN-R', { decision: 'approve', actor: 'p', role: 'Planner' })
+  const first = await decideGate(db, 'RUN-R', { decision: 'approve', user: planner })
   assert.equal(first.run.steps.find((s) => s.key === 'design').state, 'active')
 
-  const second = await decideGate(db, 'RUN-R', { decision: 'approve', actor: 'p', role: 'Planner' })
-  assert.equal(second.error, 'no_active_gate')
+  const second = await decideGate(db, 'RUN-R', { decision: 'approve', user: planner })
+  assert.equal(second.error, 'not_allowed')
   const run = await getRun(db, 'RUN-R')
   assert.equal(run.steps.find((s) => s.key === 'design').state, 'active')
 })
 
 test('a missing role is refused, not skipped', async () => {
   const db = await freshDb()
-  const out = await decideGate(db, 'RUN-0427', { decision: 'approve', actor: 'x' })
+  const out = await decideGate(db, 'RUN-0427', { decision: 'approve', user: { id: 903, username: 'x' } })
   assert.equal(out.error, 'wrong_role')
+  assert.equal((await getRun(db, 'RUN-0427')).step, 'g3')
 })

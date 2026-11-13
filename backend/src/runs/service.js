@@ -1,18 +1,12 @@
 // Run state: runs, pipeline phases (with cost/token metrics), and test results.
 // Assembles the full run view the frontend consumes, including the audit chain
-// and its verification result from the audit layer.
+// and its verification result from the audit layer. Step changes go only
+// through transition(), which applies the allowed-moves table in machine.js.
 
 import { appendEvent, getChain, verifyRun } from '../audit/service.js'
-import { inTransaction, withTransaction } from '../db.js'
+import { withTransaction } from '../db.js'
+import { GATES, MOVES, ROBOT_ACTIONS, STEPS, planMove, robotTarget, statusFor } from './machine.js'
 
-export const DEFAULT_PHASES = [
-  { key: 'req', label: 'Requirements', role: 'Agent' },
-  { key: 'g1', label: 'Gate 1', role: 'Planner' },
-  { key: 'design', label: 'Design', role: 'Agent' },
-  { key: 'g2', label: 'Gate 2', role: 'Engineer' },
-  { key: 'code', label: 'Code & Tests', role: 'Agent' },
-  { key: 'out', label: 'Output', role: 'Branch' },
-]
 
 const fmtCost = (n) => (n == null ? null : `$${Number(n).toFixed(2)}`)
 const fmtTokens = (n) => (n == null ? null : Number(n).toLocaleString('en-US'))
@@ -28,9 +22,12 @@ async function touchRun(db, runId) {
   await db.query('UPDATE runs SET updated_at = now() WHERE run_id = $1', [runId])
 }
 
-// The run row and its six phases are written in one transaction, so a failure
-// can never leave a run without phases. Generated ids retry on collision.
-export async function createRun(db, { runId, brief, description = '', repo = '', branch = '', commit = '' } = {}) {
+// The run row, its phases and its "run.created" audit event are written in one
+// transaction, so a failure can never leave a run without phases. A new run
+// starts at Requirements. createdBy is the logged-in reviewer who asked for the
+// work ({ id, username }); they may not give the final approval at Gate 3.
+// Generated ids retry on collision.
+export async function createRun(db, { runId, brief, description = '', repo = '', branch = '', commit = '', createdBy = null } = {}) {
   if (!brief) throw new Error('brief is required')
   for (let attempt = 0; ; attempt++) {
     try {
@@ -40,18 +37,23 @@ export async function createRun(db, { runId, brief, description = '', repo = '',
           const c = await tx.query('SELECT count(*)::int AS n FROM runs')
           id = `RUN-${1000 + c.rows[0].n + attempt}`
         }
+        const { status, gate } = statusFor('req')
         await tx.query(
-          `INSERT INTO runs (run_id, brief, description, repo, branch, commit)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [id, brief, description, repo, branch, commit],
+          `INSERT INTO runs (run_id, brief, description, repo, branch, commit, status, gate, step, created_by, created_by_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'req', $9, $10)`,
+          [id, brief, description, repo, branch, commit, status, gate, createdBy?.id ?? null, createdBy?.username ?? null],
         )
-        for (let i = 0; i < DEFAULT_PHASES.length; i++) {
-          const p = DEFAULT_PHASES[i]
+        for (let i = 0; i < STEPS.length; i++) {
+          const p = STEPS[i]
+          const first = i === 0
           await tx.query(
-            `INSERT INTO run_phases (run_id, seq, key, label, role) VALUES ($1, $2, $3, $4, $5)`,
-            [id, i + 1, p.key, p.label, p.role],
+            `INSERT INTO run_phases (run_id, seq, key, label, role, state, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [id, i + 1, p.key, p.label, p.role, first ? 'active' : 'pending', first ? 'In progress' : 'Not started'],
           )
         }
+        await appendEvent(tx, {
+          runId: id, event: 'run.created', actor: createdBy?.username || 'system', payload: { to: 'req' },
+        })
         return id
       })
       return getRun(db, id)
@@ -149,9 +151,14 @@ export async function getRun(db, runId) {
     repo: run.repo,
     branch: run.branch,
     commit: run.commit,
+    // step is the state machine's position (req, g1, design, g2, code, g3,
+    // done, cancelled); status and gate are derived from it for the dashboard.
+    step: run.step ?? null,
     status: run.status,
     gate: run.gate,
     awaiting: run.status === 'awaiting_gate',
+    createdBy: run.created_by_name ?? null,
+    started: run.started_at != null,
     updatedAt: run.updated_at,
     steps,
     totals: {
@@ -167,34 +174,23 @@ export async function getRun(db, runId) {
   }
 }
 
-export async function updateRun(db, runId, { status, gate, branch, commit } = {}) {
-  const sets = []
-  const vals = []
-  let i = 1
-  if (status !== undefined) { sets.push(`status = $${i++}`); vals.push(status) }
-  if (gate !== undefined) { sets.push(`gate = $${i++}`); vals.push(gate) }
-  if (branch !== undefined) { sets.push(`branch = $${i++}`); vals.push(branch) }
-  if (commit !== undefined) { sets.push(`commit = $${i++}`); vals.push(commit) }
-  if (!sets.length) return getRun(db, runId)
-  sets.push('updated_at = now()')
-  vals.push(runId)
-  const res = await db.query(
-    `UPDATE runs SET ${sets.join(', ')} WHERE run_id = $${i} RETURNING run_id`,
-    vals,
-  )
-  if (!res.rows[0]) return null
-  // Inside a transaction the caller re-reads the run after commit.
-  if (inTransaction(db)) return { id: runId }
-  return getRun(db, runId)
-}
 
-// Update a pre-seeded phase (state/status/timestamp + metering).
-export async function upsertPhase(db, runId, key, fields = {}) {
-  const allowed = ['state', 'status', 'at', 'cost_usd', 'input_tokens', 'output_tokens', 'model', 'duration_ms']
+// Phase rows hold the run's cost and token metrics. Their state, status and
+// time belong to the state machine, so the agents may only report metrics.
+const METRIC_FIELDS = ['cost_usd', 'input_tokens', 'output_tokens', 'model', 'duration_ms']
+const STATE_FIELDS = ['state', 'status', 'at']
+
+export class PhaseStateError extends Error {}
+
+export async function recordPhaseMetrics(db, runId, key, fields = {}) {
+  const forbidden = STATE_FIELDS.filter((f) => fields[f] !== undefined)
+  if (forbidden.length) {
+    throw new PhaseStateError(`${forbidden.join(', ')} can only change through a gate decision or a robot action`)
+  }
   const sets = []
   const vals = []
   let i = 1
-  for (const col of allowed) {
+  for (const col of METRIC_FIELDS) {
     if (fields[col] !== undefined) { sets.push(`${col} = $${i++}`); vals.push(fields[col]) }
   }
   if (!sets.length) return null
@@ -217,76 +213,174 @@ function nowLabel() {
   )
 }
 
-const GATE_ROLES = new Set(['Planner', 'Engineer'])
-
-// Human gate decision: approve/reject the run's currently active phase.
-// Appends a REAL audit event and advances pipeline state. (In Layer 4 this same
-// endpoint will also resume the paused LangGraph via interrupt().)
-// Returns { run } on success or { error, ... } for the route to map to a status.
-//
-// Runs in one transaction that locks the run row (SELECT ... FOR UPDATE), so
-// two reviewers deciding at the same moment are handled one after the other:
-// the second sees the gate already decided and gets no_active_gate. The phase
-// change and its audit event commit together or not at all.
-//
-// role is the reviewer's authenticated role. 'Admin' may decide any gate.
-export async function decideGate(db, runId, { decision, actor, role, feedback } = {}) {
-  if (decision !== 'approve' && decision !== 'reject') return { error: 'bad_decision' }
-
-  const out = await withTransaction(db, (tx) => decideGateLocked(tx, runId, { decision, actor, role, feedback }))
-  if (out.error) return out
-  return { run: await getRun(db, runId) }
+async function setPhase(db, runId, key, state, status, at = null) {
+  await db.query(
+    'UPDATE run_phases SET state = $1, status = $2, at = COALESCE($3, at) WHERE run_id = $4 AND key = $5',
+    [state, status, at, runId, key],
+  )
 }
 
-async function decideGateLocked(db, runId, { decision, actor, role, feedback }) {
-  const runRes = await db.query('SELECT * FROM runs WHERE run_id = $1 FOR UPDATE', [runId])
-  const run = runRes.rows[0]
-  if (!run) return { error: 'not_found' }
-  // Only a run that is waiting for a human can be decided.
-  if (run.status !== 'awaiting_gate' || !run.gate) return { error: 'no_active_gate' }
-  if (role !== 'Admin' && role !== run.gate) return { error: 'wrong_role', gate: run.gate }
+// Make the phase rows show where the run is after moving from -> to.
+// Earlier steps keep their result, the new step is active, later steps go back
+// to pending, and a gate that just sent work back shows "Changes requested"
+// until the run moves on.
+async function showStep(db, runId, from, to) {
+  const at = nowLabel()
+  const phases = (await db.query('SELECT key, seq FROM run_phases WHERE run_id = $1 ORDER BY seq ASC', [runId])).rows
+  const seqOf = (k) => phases.find((p) => p.key === k)?.seq
+  if (to === 'cancelled') return setPhase(db, runId, from, 'cancelled', 'Cancelled', at)
+  if (to === 'done') {
+    for (const p of phases) {
+      if (p.key === from) await setPhase(db, runId, p.key, 'approved', 'Approved', at)
+      else if (p.key === 'done') await setPhase(db, runId, p.key, 'approved', 'Complete', at)
+    }
+    return
+  }
+  const back = seqOf(to) < seqOf(from)
+  for (const p of phases) {
+    if (p.key === to) {
+      const status = GATES.has(to) ? 'Ready for review' : back ? 'Rework requested' : 'In progress'
+      await setPhase(db, runId, p.key, 'active', status)
+    } else if (p.key === from) {
+      if (back) await setPhase(db, runId, p.key, 'rejected', 'Changes requested', at)
+      else await setPhase(db, runId, p.key, 'approved', GATES.has(from) ? 'Approved' : 'Complete', at)
+    } else if (p.seq > seqOf(to)) {
+      await setPhase(db, runId, p.key, 'pending', 'Not started')
+    }
+  }
+}
 
-  const phaseRes = await db.query(
-    'SELECT * FROM run_phases WHERE run_id = $1 ORDER BY seq ASC',
+// The only function that changes a run's step. In one transaction it locks the
+// run row, checks the move against the table in machine.js, updates the run
+// and its phases, and writes exactly one audit event. Two callers deciding at
+// the same moment are handled one after the other; the second sees the new step.
+//
+// pick(run) returns the action to try for the run as it is now (or { error }).
+// actor: { kind, role, userId } for planMove; name: who the audit log records.
+// details: what a robot wants recorded with its move (e.g. the files changed).
+// artifacts: what a robot hands over with its move, stored only if the move is allowed.
+// expectedStep: refuse with 'stale' if the run is no longer at this step.
+// sameAs: for robot actions, a step at which the action already happened, so a
+// repeat returns { unchanged: true } instead of an error.
+async function transition(db, runId, { pick, actor, name, feedback, details, artifacts, expectedStep, sameAs }) {
+  const out = await withTransaction(db, async (tx) => {
+    const run = (await tx.query('SELECT * FROM runs WHERE run_id = $1 FOR UPDATE', [runId])).rows[0]
+    if (!run) return { error: 'not_found' }
+    if (expectedStep != null && expectedStep !== run.step) return { error: 'stale', step: run.step }
+    if (sameAs && run.step === sameAs) return { unchanged: true }
+
+    const action = pick(run)
+    if (action.error) return action
+    const plan = planMove({ step: run.step, createdBy: run.created_by }, action, actor)
+    if (plan.error) return { ...plan, step: run.step }
+
+    const { status, gate } = statusFor(plan.to)
+    await tx.query(
+      'UPDATE runs SET step = $1, status = $2, gate = $3, updated_at = now() WHERE run_id = $4',
+      [plan.to, status, gate, runId],
+    )
+    await showStep(tx, runId, run.step, plan.to)
+    if (artifacts) await upsertArtifacts(tx, runId, artifacts)
+    const payload = { from: run.step, to: plan.to }
+    if (typeof feedback === 'string' && feedback.trim()) payload.feedback = feedback
+    if (details) payload.details = details
+    await appendEvent(tx, { runId, event: plan.move.event, actor: name, payload })
+    return { from: run.step, to: plan.to }
+  })
+  if (out.error) return out
+  return { ...out, run: await getRun(db, runId) }
+}
+
+const humanActor = (user) => ({ kind: 'human', role: user?.role, userId: user?.id })
+
+// A human gate decision. decision: 'approve' | 'reject'. At Gate 3 a reject
+// must say where the work goes back to: target 'code' or 'design'.
+// user is the logged-in reviewer ({ id, username, role }); 'Admin' may decide
+// any gate. Returns { run, from, to } or { error, ... }.
+export async function decideGate(db, runId, { decision, target, feedback, expectedStep, user } = {}) {
+  if (decision !== 'approve' && decision !== 'reject') return { error: 'bad_decision' }
+  const pick = (run) => {
+    if (decision === 'approve') return 'approve'
+    if (run.step !== 'g3') return 'reject'
+    if (target === 'code') return 'reject_to_code'
+    if (target === 'design') return 'reject_to_design'
+    return { error: 'target_required' }
+  }
+  return transition(db, runId, {
+    pick, actor: humanActor(user), name: user?.username, feedback, expectedStep,
+  })
+}
+
+// Cancel a run from any active step (Planner, Engineer or Admin).
+export async function cancelRun(db, runId, { user, feedback, expectedStep } = {}) {
+  return transition(db, runId, {
+    pick: () => 'cancel', actor: humanActor(user), name: user?.username, feedback, expectedStep,
+  })
+}
+
+// A robot finished its step: submit_requirements | submit_design | request_review.
+// Repeating one that already went through returns { run, unchanged: true }
+// and stores nothing. details (optional plain object) is stored inside that
+// move's audit entry. artifacts (optional) is the work being handed over; each
+// action may only carry its own kind (see ACTION_ARTIFACTS).
+// The artifacts each robot step produces. A robot can only write the ones of
+// the step the run is at, so what a reviewer is looking at a gate (or approved
+// at Done) cannot be swapped afterwards.
+const STEP_ARTIFACTS = {
+  req: ['requirements'],
+  design: ['design'],
+  code: ['files', 'diff', 'summary'],
+}
+const ACTION_ARTIFACTS = Object.fromEntries(
+  MOVES.filter((m) => ROBOT_ACTIONS.has(m.action)).map((m) => [m.action, STEP_ARTIFACTS[m.from]]),
+)
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+export async function robotAction(db, runId, action, { agent, details, artifacts } = {}) {
+  if (!ROBOT_ACTIONS.has(action)) return { error: 'bad_action' }
+  if (details !== undefined && !isPlainObject(details)) return { error: 'bad_details' }
+  if (artifacts !== undefined) {
+    if (!isPlainObject(artifacts)) return { error: 'bad_artifacts' }
+    if (Object.keys(artifacts).some((k) => !ACTION_ARTIFACTS[action].includes(k))) return { error: 'bad_artifacts' }
+  }
+  const out = await transition(db, runId, {
+    pick: () => action, actor: { kind: 'agent' }, name: `agent:${agent}`, details, artifacts, sameAs: robotTarget(action),
+  })
+  if (out.unchanged) return { unchanged: true, run: await getRun(db, runId) }
+  return out
+}
+
+// An agent stores work in progress for the step the run is at (B1). Returns
+// { ok: true } or { error: 'not_found' | 'bad_artifacts' | 'wrong_step', step }.
+export async function writeStepArtifacts(db, runId, artifacts) {
+  if (!isPlainObject(artifacts)) return { error: 'bad_artifacts' }
+  return withTransaction(db, async (tx) => {
+    const run = (await tx.query('SELECT step FROM runs WHERE run_id = $1 FOR UPDATE', [runId])).rows[0]
+    if (!run) return { error: 'not_found' }
+    const allowed = STEP_ARTIFACTS[run.step] || []
+    if (!Object.keys(artifacts).every((k) => allowed.includes(k))) return { error: 'wrong_step', step: run.step }
+    await upsertArtifacts(tx, runId, artifacts)
+    return { ok: true }
+  })
+}
+
+// Start is safe to repeat: the first call claims the run (only a run still at
+// Requirements that was never started), later calls get { error: 'started' }.
+// releaseStart() undoes the claim when the pipeline could not be reached.
+export async function claimStart(db, runId) {
+  const res = await db.query(
+    `UPDATE runs SET started_at = now() WHERE run_id = $1 AND started_at IS NULL AND step = 'req' RETURNING run_id`,
     [runId],
   )
-  const phases = phaseRes.rows
-  const active = phases.find((p) => p.state === 'active')
-  if (!active) return { error: 'no_active_gate' }
+  if (res.rows[0]) return { ok: true }
+  const run = (await db.query('SELECT step, started_at FROM runs WHERE run_id = $1', [runId])).rows[0]
+  if (!run) return { error: 'not_found' }
+  return { error: run.started_at ? 'started' : 'not_allowed', step: run.step }
+}
 
-  const at = nowLabel()
-  const by = actor || role || 'reviewer'
-
-  if (decision === 'approve') {
-    await upsertPhase(db, runId, active.key, { state: 'approved', status: 'Approved', at })
-    await appendEvent(db, {
-      runId, event: `${active.key}.approved`, actor: by,
-      payload: feedback ? { feedback } : {},
-    })
-    const next = phases.find((p) => p.seq > active.seq && p.state === 'pending' && p.key !== 'out')
-    if (next) {
-      const isGate = GATE_ROLES.has(next.role)
-      await upsertPhase(db, runId, next.key, {
-        state: 'active', status: isGate ? 'Ready for review' : 'In progress',
-      })
-      await updateRun(db, runId, { status: isGate ? 'awaiting_gate' : 'running', gate: next.role })
-    } else {
-      const out = phases.find((p) => p.key === 'out')
-      if (out && out.state === 'pending') {
-        await upsertPhase(db, runId, 'out', { state: 'approved', status: 'Complete', at })
-      }
-      await updateRun(db, runId, { status: 'approved', gate: null })
-    }
-  } else {
-    await upsertPhase(db, runId, active.key, { state: 'rejected', status: 'Rejected', at })
-    await appendEvent(db, {
-      runId, event: `${active.key}.rejected`, actor: by,
-      payload: feedback ? { feedback } : {},
-    })
-    await updateRun(db, runId, { status: 'rejected', gate: null })
-  }
-
-  return { ok: true }
+export async function releaseStart(db, runId) {
+  await db.query('UPDATE runs SET started_at = NULL WHERE run_id = $1', [runId])
 }
 
 // Store the artifacts the coding agent produced (files / diff / summary / requirements / design / comments).

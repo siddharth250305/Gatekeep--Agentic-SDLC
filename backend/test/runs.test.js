@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createRun, getRun, listRuns, updateRun, upsertPhase, upsertTests, upsertArtifacts } from '../src/runs/service.js'
+import { createRun, getRun, listRuns, recordPhaseMetrics, upsertTests, upsertArtifacts } from '../src/runs/service.js'
 import { appendEvent, tamperEvent } from '../src/audit/service.js'
 import { seed } from '../src/runs/seed.js'
 import { createApp } from '../src/app.js'
@@ -8,22 +8,25 @@ import { freshDb } from './helpers/db.js'
 import { asAgent, asReviewer } from './helpers/auth.js'
 
 
-test('createRun seeds the 6-phase pipeline', async () => {
+test('createRun seeds the 7-step pipeline, starting at Requirements', async () => {
   const db = await freshDb()
   const run = await createRun(db, { runId: 'RUN-1', brief: 'Add a thing' })
   assert.equal(run.id, 'RUN-1')
-  assert.equal(run.steps.length, 6)
-  assert.deepEqual(run.steps.map((s) => s.key), ['req', 'g1', 'design', 'g2', 'code', 'out'])
-  assert.ok(run.steps.every((s) => s.state === 'pending'))
+  assert.equal(run.steps.length, 7)
+  assert.deepEqual(run.steps.map((s) => s.key), ['req', 'g1', 'design', 'g2', 'code', 'g3', 'done'])
+  assert.equal(run.steps[0].state, 'active')
+  assert.ok(run.steps.slice(1).every((s) => s.state === 'pending'))
+  assert.equal(run.step, 'req')
   assert.equal(run.totals.cost, '$0.00')
-  assert.equal(run.verified, true) // empty chain is trivially valid
+  assert.equal(run.verified, true)
+  assert.deepEqual(run.auditChain.map((e) => e.event), ['run.created'])
 })
 
 test('phase metrics roll up into totals', async () => {
   const db = await freshDb()
   await createRun(db, { runId: 'RUN-2', brief: 'x' })
-  await upsertPhase(db, 'RUN-2', 'req', { state: 'approved', status: 'Approved', cost_usd: 0.12, input_tokens: 2800, output_tokens: 1380, duration_ms: 96000 })
-  await upsertPhase(db, 'RUN-2', 'design', { state: 'approved', status: 'Approved', cost_usd: 0.16, input_tokens: 4100, output_tokens: 2140, duration_ms: 148000 })
+  await recordPhaseMetrics(db, 'RUN-2', 'req', { cost_usd: 0.12, input_tokens: 2800, output_tokens: 1380, duration_ms: 96000 })
+  await recordPhaseMetrics(db, 'RUN-2', 'design', { cost_usd: 0.16, input_tokens: 4100, output_tokens: 2140, duration_ms: 148000 })
   const run = await getRun(db, 'RUN-2')
   assert.equal(run.totals.cost, '$0.28')
   assert.equal(run.totals.tokens, '10,420')
@@ -51,10 +54,10 @@ test('run view carries the audit chain + verified, and detects tamper', async ()
   await appendEvent(db, { runId: 'RUN-4', event: 'design.approved', actor: 'b', payload: { file: 'ok.py' } })
 
   let run = await getRun(db, 'RUN-4')
-  assert.equal(run.auditChain.length, 2)
+  assert.equal(run.auditChain.length, 3) // createRun's own run.created + the two above
   assert.equal(run.verified, true)
 
-  await tamperEvent(db, 'RUN-4', 2, { file: 'backdoor.py' })
+  await tamperEvent(db, 'RUN-4', 3, { file: 'backdoor.py' })
   run = await getRun(db, 'RUN-4')
   assert.equal(run.verified, false)
 })
@@ -73,13 +76,11 @@ test('artifacts (files/diff/summary) surface on the run', async () => {
   assert.equal(run.summary.headline, 'Ready')
 })
 
-test('updateRun flips status + awaiting', async () => {
+test('phase state cannot be written through the metrics function', async () => {
   const db = await freshDb()
   await createRun(db, { runId: 'RUN-5', brief: 'x' })
-  const run = await updateRun(db, 'RUN-5', { status: 'awaiting_gate', gate: 'Engineer' })
-  assert.equal(run.status, 'awaiting_gate')
-  assert.equal(run.awaiting, true)
-  assert.equal(run.gate, 'Engineer')
+  await assert.rejects(recordPhaseMetrics(db, 'RUN-5', 'g1', { state: 'approved' }), /can only change through/)
+  assert.equal((await getRun(db, 'RUN-5')).steps.find((s) => s.key === 'g1').state, 'pending')
 })
 
 test('seed loads 3 demo runs; RUN-0427 is awaiting with real chain', async () => {
@@ -90,13 +91,15 @@ test('seed loads 3 demo runs; RUN-0427 is awaiting with real chain', async () =>
   assert.equal(list.length, 3)
   const r = await getRun(db, 'RUN-0427')
   assert.equal(r.awaiting, true)
+  assert.equal(r.step, 'g3')
   assert.equal(r.totals.cost, '$0.42')
   assert.equal(r.totals.tokens, '18,420')
-  assert.equal(r.auditChain.length, 4)
+  // run.created + 5 moves through the state machine
+  assert.equal(r.auditChain.length, 6)
   assert.equal(r.verified, true)
 })
 
-test('HTTP: create -> get -> patch, and 404 on missing', async () => {
+test('HTTP: create -> get, PATCH is gone, and 404 on missing', async () => {
   const db = await freshDb()
   const app = createApp(db)
   const human = await asReviewer(db)
@@ -114,11 +117,12 @@ test('HTTP: create -> get -> patch, and 404 on missing', async () => {
     const got = await (await fetch(`${base}/runs/RUN-H`, { headers: human })).json()
     assert.equal(got.brief, 'http run')
 
-    const patched = await (await fetch(`${base}/runs/RUN-H`, {
+    const patched = await fetch(`${base}/runs/RUN-H`, {
       method: 'PATCH', headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({ status: 'approved' }),
-    })).json()
-    assert.equal(patched.status, 'approved')
+    })
+    assert.equal(patched.status, 404)
+    assert.equal((await (await fetch(`${base}/runs/RUN-H`, { headers: human })).json()).status, 'running')
 
     const missing = await fetch(`${base}/runs/RUN-NOPE`, { headers: human })
     assert.equal(missing.status, 404)
