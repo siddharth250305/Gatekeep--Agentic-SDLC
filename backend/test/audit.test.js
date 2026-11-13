@@ -63,8 +63,8 @@ test('HTTP flow: append -> verify ok -> tamper -> verify broken', async () => {
 
   try {
     for (const ev of [
-      { event: 'run.created', actor: 'ml-priya' },
-      { event: 'design.approved', actor: 'o-lindqvist', payload: { file: 'throttle.py' } },
+      { event: 'mcp.session.created' },
+      { event: 'mcp.file.written', payload: { file: 'throttle.py' } },
     ]) {
       const res = await fetch(`${base}/runs/RUN-9/audit`, {
         method: 'POST',
