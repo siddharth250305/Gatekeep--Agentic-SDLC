@@ -8,7 +8,11 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "seed": "node src/seed-cli.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "test:pg": "TEST_DATABASE_URL=${TEST_DATABASE_URL:-postgres://gatekeep:gatekeep@localhost:5432/gatekeep_test} node --test test/*.test.js",
+    "user:create": "node src/cli/user-create.js",
+    "token:create": "node src/cli/token.js create",
+    "token:revoke": "node src/cli/token.js revoke"
   },
   "dependencies": {
     "express": "^4.21.2",

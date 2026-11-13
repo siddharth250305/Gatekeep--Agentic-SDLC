@@ -103,3 +103,39 @@ CREATE TABLE IF NOT EXISTS mcp_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_sessions_run ON mcp_sessions (run_id);
 CREATE INDEX IF NOT EXISTS idx_mcp_sessions_status ON mcp_sessions (status);
+
+-- Latest seq + hash of each run's audit chain. Appends lock this row
+-- (SELECT ... FOR UPDATE) so concurrent writers to one run are serialized.
+CREATE TABLE IF NOT EXISTS audit_heads (
+  run_id TEXT PRIMARY KEY,
+  seq    INTEGER NOT NULL,
+  hash   TEXT    NOT NULL
+);
+
+-- Human reviewers. role: Planner | Engineer | Admin (Admin may act for any gate).
+CREATE TABLE IF NOT EXISTS users (
+  id            BIGSERIAL PRIMARY KEY,
+  username      TEXT UNIQUE NOT NULL,
+  display_name  TEXT NOT NULL,
+  role          TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  disabled      BOOLEAN NOT NULL DEFAULT false,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Dashboard login sessions. Only a SHA-256 of the token is stored.
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+-- Long-lived tokens for the agent services (MCP server, pipeline). They can
+-- submit work but can never approve a gate. Only a SHA-256 is stored.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  token_hash TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at TIMESTAMPTZ
+);
