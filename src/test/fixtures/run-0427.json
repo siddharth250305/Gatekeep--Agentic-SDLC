@@ -1,0 +1,309 @@
+{
+  "id": "RUN-0427",
+  "files": [
+    {
+      "path": "app/middleware/throttle.py",
+      "add": 48,
+      "rem": 6
+    },
+    {
+      "path": "app/deps/redis.py",
+      "add": 12,
+      "rem": 3
+    },
+    {
+      "path": "app/routes/webhook.py",
+      "add": 20,
+      "rem": 4
+    },
+    {
+      "path": "tests/test_throttle.py",
+      "add": 64,
+      "rem": 0
+    },
+    {
+      "path": "tests/test_webhook.py",
+      "add": 18,
+      "rem": 2
+    },
+    {
+      "path": "README.md",
+      "add": 4,
+      "rem": 0
+    }
+  ],
+  "diff": {
+    "file": "app/middleware/throttle.py",
+    "add": 48,
+    "rem": 6,
+    "lines": [
+      {
+        "n1": 11,
+        "n2": 12,
+        "type": "ctx",
+        "text": "class RateLimiter:"
+      },
+      {
+        "n1": 12,
+        "n2": 13,
+        "type": "ctx",
+        "text": "    def __init__(self, redis: Redis, limit: int = 60):"
+      },
+      {
+        "n1": 13,
+        "n2": 14,
+        "type": "ctx",
+        "text": "        self.redis = redis"
+      },
+      {
+        "n1": 14,
+        "n2": 15,
+        "type": "ctx",
+        "text": "        self.limit = limit"
+      },
+      {
+        "n1": 15,
+        "n2": null,
+        "type": "rem",
+        "text": "    def is_allowed(self, key: str) -> bool:"
+      },
+      {
+        "n1": 16,
+        "n2": null,
+        "type": "rem",
+        "text": "        count = self.redis.incr(key)"
+      },
+      {
+        "n1": 17,
+        "n2": null,
+        "type": "rem",
+        "text": "        return count <= self.limit"
+      },
+      {
+        "n1": null,
+        "n2": 16,
+        "type": "add",
+        "text": "    def is_allowed(self, key: str) -> tuple[bool, int]:"
+      },
+      {
+        "n1": null,
+        "n2": 17,
+        "type": "add",
+        "text": "        current = self.redis.incr(key)"
+      },
+      {
+        "n1": null,
+        "n2": 18,
+        "type": "add",
+        "text": "        if current == 1:"
+      },
+      {
+        "n1": null,
+        "n2": 19,
+        "type": "add",
+        "text": "            self.redis.expire(key, 60)"
+      },
+      {
+        "n1": null,
+        "n2": 20,
+        "type": "add",
+        "text": "        remaining = max(0, self.limit - current)"
+      },
+      {
+        "n1": null,
+        "n2": 21,
+        "type": "add",
+        "text": "        return current <= self.limit, remaining"
+      },
+      {
+        "n1": 24,
+        "n2": 28,
+        "type": "ctx",
+        "text": "    def throttle_key(self, merchant_id: str) -> str:"
+      },
+      {
+        "n1": 25,
+        "n2": 29,
+        "type": "ctx",
+        "text": "        return f\"throttle:{merchant_id}\""
+      }
+    ]
+  },
+  "summary": {
+    "headline": "Ready for your review",
+    "sub": "The code has been generated, tested and is ready for approval.",
+    "checks": [
+      "14/14 tests passed",
+      "2 self-heal iterations",
+      "All previous gates approved",
+      "Sandbox executed with no network access"
+    ]
+  },
+  "requirements": "### Engineering Requirements: Webhook Rate Limiting\n\n#### 1. Problem Statement\nThe checkout webhook is vulnerable to burst traffic and unauthenticated request floods, creating downstream queue starvation and latency spikes in payment reconciliation.\n\n#### 2. User Stories & Acceptance Criteria\n- **AC-1**: Limit webhook invocations to 60 requests per minute per merchant ID (`merchant_<id>`).\n- **AC-2**: When limit is exceeded, immediately return HTTP 429 Too Many Requests with header `Retry-After: 60`.\n- **AC-3**: Internal reconciliation worker requests bearing header `X-Internal-Secret` must bypass rate limiting entirely.\n- **AC-4**: Sliding window counters stored in Redis with 60-second TTL; no persistent memory leakage.",
+  "design": {
+    "files_to_modify": [
+      "app/middleware/throttle.py",
+      "app/deps/redis.py",
+      "app/routes/webhook.py"
+    ],
+    "files_to_create": [
+      "tests/test_throttle.py",
+      "tests/test_webhook.py"
+    ],
+    "threat_model": "Spoofing: Internal secret verified using constant-time comparison.\nTampering: Redis counter keys scoped by namespace to prevent merchant collisions.\nDenial of Service: Atomic INCR + EXPIRE sliding window blocks brute-force exhaustion.",
+    "testing_strategy": [
+      "Verify 60 requests succeed within 60 seconds",
+      "Verify 61st request returns HTTP 429 with Retry-After header",
+      "Verify X-Internal-Secret bypasses throttling under load"
+    ]
+  },
+  "comments": [],
+  "repositoryContext": null,
+  "brief": "Add rate limiting to the checkout webhook",
+  "description": "Implement rate limiting (60 req/min per merchant) for the checkout webhook. Return 429 with Retry-After. Exempt internal reconciliation traffic.",
+  "repo": "commerce-core",
+  "branch": "feat/webhook-throttle",
+  "commit": "9f3c2e1",
+  "status": "awaiting_gate",
+  "gate": "Engineer",
+  "awaiting": true,
+  "updatedAt": "2026-11-13T17:53:13.166Z",
+  "steps": [
+    {
+      "key": "req",
+      "label": "Requirements",
+      "role": "Agent",
+      "state": "approved",
+      "status": "Approved",
+      "at": "Sep 17, 10:24",
+      "num": 1,
+      "cost": "$0.12",
+      "tokens": "4,180"
+    },
+    {
+      "key": "g1",
+      "label": "Gate 1",
+      "role": "Planner",
+      "state": "approved",
+      "status": "Approved",
+      "at": "Sep 17, 10:32",
+      "num": 2,
+      "cost": null,
+      "tokens": null
+    },
+    {
+      "key": "design",
+      "label": "Design",
+      "role": "Agent",
+      "state": "approved",
+      "status": "Approved",
+      "at": "Sep 17, 11:02",
+      "num": 3,
+      "cost": "$0.16",
+      "tokens": "6,240"
+    },
+    {
+      "key": "g2",
+      "label": "Gate 2",
+      "role": "Engineer",
+      "state": "approved",
+      "status": "Approved",
+      "at": "Sep 17, 11:15",
+      "num": 4,
+      "cost": null,
+      "tokens": null
+    },
+    {
+      "key": "code",
+      "label": "Code & Tests",
+      "role": "Agent",
+      "state": "active",
+      "status": "Ready for review",
+      "at": null,
+      "num": 5,
+      "cost": "$0.14",
+      "tokens": "8,000"
+    },
+    {
+      "key": "out",
+      "label": "Output",
+      "role": "Branch",
+      "state": "pending",
+      "status": "Not started",
+      "at": null,
+      "num": 6,
+      "cost": null,
+      "tokens": null
+    }
+  ],
+  "totals": {
+    "cost": "$0.42",
+    "tokens": "18,420",
+    "wall": "8m 31s"
+  },
+  "sandbox": {
+    "status": "Completed",
+    "image": "python:3.12-slim",
+    "network": "Disabled",
+    "memory": "512 MB",
+    "cpu": "1 core",
+    "timeout": "30 seconds"
+  },
+  "tests": {
+    "status": "Completed",
+    "passed": 14,
+    "failed": 0,
+    "total": 14,
+    "iterations": 2,
+    "duration": "4m 27s",
+    "output": null
+  },
+  "auditChain": [
+    {
+      "seq": 1,
+      "event": "run.created",
+      "actor": "ml-priya",
+      "payload": {},
+      "createdAt": "2026-11-13T17:53:13.169Z",
+      "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "5b8d64e1a1fc257ec6f3e274651642edc7e29aec247a98b10d30ca7c852566d8"
+    },
+    {
+      "seq": 2,
+      "event": "requirements.approved",
+      "actor": "ml-priya",
+      "payload": {},
+      "createdAt": "2026-11-13T17:53:13.171Z",
+      "prevHash": "5b8d64e1a1fc257ec6f3e274651642edc7e29aec247a98b10d30ca7c852566d8",
+      "hash": "369aa8b5d2bbb77ea4cc265c88b544b0b63606076d71b78406b6c3ac425473b5"
+    },
+    {
+      "seq": 3,
+      "event": "design.approved",
+      "actor": "o-lindqvist",
+      "payload": {
+        "file": "app/middleware/throttle.py"
+      },
+      "createdAt": "2026-11-13T17:53:13.173Z",
+      "prevHash": "369aa8b5d2bbb77ea4cc265c88b544b0b63606076d71b78406b6c3ac425473b5",
+      "hash": "69ced68c3458bc8f3a78af846d59aaeeb983ef79dd756db4f64c4d26bc961e56"
+    },
+    {
+      "seq": 4,
+      "event": "coding.completed",
+      "actor": "code-agent",
+      "payload": {
+        "tests": "14/14"
+      },
+      "createdAt": "2026-11-13T17:53:13.174Z",
+      "prevHash": "69ced68c3458bc8f3a78af846d59aaeeb983ef79dd756db4f64c4d26bc961e56",
+      "hash": "ff1c8596f6d21e736cbb40568155e13230b54e4611a751083d25bac190e1612d"
+    }
+  ],
+  "verified": true,
+  "verify": {
+    "runId": "RUN-0427",
+    "valid": true,
+    "length": 4
+  }
+}
