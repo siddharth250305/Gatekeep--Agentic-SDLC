@@ -12,10 +12,11 @@ returns a PolicyResult with allowed/denied + reason.
 
 from __future__ import annotations
 
-import fnmatch
 import re
 from dataclasses import dataclass
 from typing import Any
+
+from ..repository.security import SENSITIVE_DIRS, SENSITIVE_GLOBS, is_sensitive_path
 
 
 @dataclass
@@ -31,12 +32,9 @@ class PolicyEngine:
     # Canonical phase order (same as DEFAULT_PHASES in backend runs/service.js).
     VALID_PHASES = ["req", "g1", "design", "g2", "code", "out"]
 
-    # Sensitive file globs — must stay in sync with repository/security.py.
-    BLOCKED_FILE_PATTERNS = [
-        ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
-        "credentials.*", "secrets.*", "secret.*", "id_rsa", "id_dsa",
-        "*.keystore", "*.jks", ".npmrc", ".pypirc", ".netrc",
-    ]
+    # The one shared list lives in repository/security.py.
+    BLOCKED_FILE_PATTERNS = SENSITIVE_GLOBS
+    BLOCKED_DIRECTORIES = sorted(SENSITIVE_DIRS)
 
     # Which phases each tool is allowed in.  "ALL" means every phase.
     _ALL = VALID_PHASES
@@ -118,11 +116,9 @@ class PolicyEngine:
         if any(part.lower() == ".git" for part in parts):
             return PolicyResult(False, "Git metadata (.git) cannot be read or written")
 
-        filename = parts[-1].lower()
-        for pattern in self.BLOCKED_FILE_PATTERNS:
-            if fnmatch.fnmatch(filename, pattern):
-                action = "write to" if write else "read"
-                return PolicyResult(False, f"Cannot {action} '{filename}' — blocked by security policy")
+        if is_sensitive_path(path):
+            action = "write to" if write else "read"
+            return PolicyResult(False, f"Cannot {action} '{path}' — blocked by security policy")
 
         return PolicyResult(True, "OK")
 
@@ -167,6 +163,7 @@ class PolicyEngine:
             "allowed_tools": allowed,
             "denied_tools": denied,
             "blocked_patterns": list(self.BLOCKED_FILE_PATTERNS),
+            "blocked_directories": list(self.BLOCKED_DIRECTORIES),
         }
 
 

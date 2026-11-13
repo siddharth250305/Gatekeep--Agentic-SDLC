@@ -1,5 +1,5 @@
 import pytest
-from app.mcp.policy import PolicyEngine, PolicyResult
+from app.mcp.policy import PolicyEngine
 
 def test_repository_tools_allowed_in_all_phases():
     """Verify that repository tools are allowed in every phase."""
