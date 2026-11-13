@@ -1,20 +1,25 @@
 """FastAPI wrapper around the LangGraph pipeline.
 
 POST /pipeline/{run_id}/start   {brief}            run agents until the first gate
-POST /pipeline/{run_id}/resume  {decision}         resume a paused gate
+POST /pipeline/{run_id}/resume  {decision, gate, actor}  resume a paused gate
+
+Both endpoints only accept calls from the GateKeep backend, which sends the
+shared secret GATEKEEP_PIPELINE_SECRET after checking the reviewer's login.
 """
 
 import os
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
+from .backend_auth import pipeline_secret_ok
 from .graph import build_graph, resume_run, start_run
 from .llm import get_llm
 from .reporter import HttpReporter
 from .sandbox import SandboxRunner
+from .workspace import validate_run_id
 
 
 def _checkpointer():
@@ -42,6 +47,21 @@ app = FastAPI(title="GateKeep agents")
 _pipeline = build_graph(get_llm(), HttpReporter(), SandboxRunner(), _checkpointer())
 
 
+def require_backend(x_gatekeep_pipeline_secret: str = Header(default="")) -> None:
+    """Fail closed: no configured secret, or a wrong one, means no access."""
+    if not os.getenv("GATEKEEP_PIPELINE_SECRET"):
+        raise HTTPException(503, "GATEKEEP_PIPELINE_SECRET is not configured")
+    if not pipeline_secret_ok(x_gatekeep_pipeline_secret):
+        raise HTTPException(401, "only the GateKeep backend may call the pipeline")
+
+
+def safe_run_id(run_id: str) -> str:
+    try:
+        return validate_run_id(run_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 class StartBody(BaseModel):
     brief: str
     repo: str = ""
@@ -51,6 +71,8 @@ class StartBody(BaseModel):
 class ResumeBody(BaseModel):
     decision: str  # "approve" | "reject"
     feedback: str = ""
+    actor: str = ""  # the reviewer, as authenticated by the backend
+    gate: str = ""   # the gate being decided (g1 / g2 / code); refused if the run moved on
 
 
 @app.get("/health")
@@ -58,15 +80,17 @@ def health():
     return {"ok": True}
 
 
-@app.post("/pipeline/{run_id}/start")
+@app.post("/pipeline/{run_id}/start", dependencies=[Depends(require_backend)])
 def start(run_id: str, body: StartBody):
-    return start_run(_pipeline, run_id, body.brief, body.repo, body.branch)
+    return start_run(_pipeline, safe_run_id(run_id), body.brief, body.repo, body.branch)
 
 
-@app.post("/pipeline/{run_id}/resume")
+@app.post("/pipeline/{run_id}/resume", dependencies=[Depends(require_backend)])
 def resume(run_id: str, body: ResumeBody):
-    out = resume_run(_pipeline, run_id, body.decision, body.feedback)
-    # 409 -> the run has no live pipeline here; the caller (Node) falls back.
+    out = resume_run(_pipeline, safe_run_id(run_id), body.decision, body.feedback,
+                     gate=body.gate or None, actor=body.actor)
+    # 409 with reason "not_running" -> no live pipeline here; Node falls back.
+    # 409 with reason "stale_gate"  -> the gate was already decided; Node refuses.
     if out.get("resumed") is False:
         return JSONResponse(out, status_code=409)
     return out

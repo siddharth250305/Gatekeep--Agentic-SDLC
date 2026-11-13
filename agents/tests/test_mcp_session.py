@@ -8,9 +8,11 @@ Validates that:
 """
 
 from unittest.mock import MagicMock, patch
+
+import httpx
 import pytest
 
-from app.mcp.session import SessionManager, McpSession
+from app.mcp.session import SessionManager
 
 
 def test_create_session_generates_uuid():
@@ -36,7 +38,8 @@ def test_create_session_validates_run():
     """Verify ValueError is raised if the backend returns 404 for run."""
     sm = SessionManager(base_url="http://test-backend")
     
-    with patch("httpx.get", side_effect=Exception("404 Not Found")):
+    not_found = httpx.Response(404, request=httpx.Request("GET", "http://localhost:4040/runs/RUN-9999"))
+    with patch("httpx.get", return_value=not_found):
         with pytest.raises(ValueError, match="Run RUN-9999 not found"):
             sm.create_session("RUN-9999")
 

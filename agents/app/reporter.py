@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 
+from .backend_auth import auth_headers
+
 
 class HttpReporter:
     def __init__(self, base: str | None = None):
@@ -14,34 +16,35 @@ class HttpReporter:
         self.base = base or os.getenv("GATEKEEP_API", "http://localhost:4040")
 
     def phase(self, run_id: str, key: str, **fields):
-        self._httpx.put(f"{self.base}/runs/{run_id}/phases/{key}", json=fields, timeout=8)
+        self._httpx.put(f"{self.base}/runs/{run_id}/phases/{key}", json=fields, headers=auth_headers(), timeout=8)
 
     def run(self, run_id: str, **fields):
-        self._httpx.patch(f"{self.base}/runs/{run_id}", json=fields, timeout=8)
+        self._httpx.patch(f"{self.base}/runs/{run_id}", json=fields, headers=auth_headers(), timeout=8)
 
     def audit(self, run_id: str, event: str, actor: str, payload: dict | None = None):
         self._httpx.post(
             f"{self.base}/runs/{run_id}/audit",
             json={"event": event, "actor": actor, "payload": payload or {}},
+            headers=auth_headers(),
             timeout=8,
         )
 
     def tests(self, run_id: str, **fields):
-        self._httpx.put(f"{self.base}/runs/{run_id}/tests", json=fields, timeout=8)
+        self._httpx.put(f"{self.base}/runs/{run_id}/tests", json=fields, headers=auth_headers(), timeout=8)
 
     def artifacts(self, run_id: str, **fields):
-        self._httpx.put(f"{self.base}/runs/{run_id}/artifacts", json=fields, timeout=8)
+        self._httpx.put(f"{self.base}/runs/{run_id}/artifacts", json=fields, headers=auth_headers(), timeout=8)
 
     def event(self, run_id: str, type: str, data: dict | None = None):
         """Transient WebSocket event (not persisted)."""
         try:
-            self._httpx.post(f"{self.base}/runs/{run_id}/event", json={"type": type, "data": data or {}}, timeout=5)
+            self._httpx.post(f"{self.base}/runs/{run_id}/event", json={"type": type, "data": data or {}}, headers=auth_headers(), timeout=5)
         except Exception:
             pass  # transient UX only; never block the pipeline
 
     def repo_context(self, run_id: str, context: dict):
         """Store the UI-safe repository context (no source, no secrets)."""
-        self._httpx.put(f"{self.base}/runs/{run_id}/context", json=context, timeout=8)
+        self._httpx.put(f"{self.base}/runs/{run_id}/context", json=context, headers=auth_headers(), timeout=8)
 
 
 class NullReporter:

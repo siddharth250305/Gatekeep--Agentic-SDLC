@@ -10,8 +10,7 @@ from __future__ import annotations
 import json
 import operator
 import os
-import re
-import subprocess
+import threading
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
@@ -22,6 +21,7 @@ from langgraph.types import Command, interrupt
 from .pricing import cost_usd
 from .sandbox import verdict
 from .selfheal import self_heal
+from .diffing import diff_artifacts, workspace_diff
 from .workspace import fetch_repo, is_git_url, read_file
 from .repository.context import build_context
 from .repository import scanner
@@ -179,30 +179,6 @@ def _build_design(feature: str, ctx: dict | None) -> dict:
         "testing_strategy": [f"test {slug} returns ok", f"test {slug} handles the error path"],
         "risks": ["change is minimal; a real model (ANTHROPIC_API_KEY) would edit the files above directly"],
     }
-
-
-def _parse_diff_lines(diff_text: str) -> list[dict]:
-    lines = []
-    old_n, new_n = 0, 0
-    for line in diff_text.splitlines():
-        if line.startswith("@@"):
-            m = re.search(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-            if m:
-                old_n, new_n = int(m.group(1)), int(m.group(2))
-            continue
-        if line.startswith("+++") or line.startswith("---") or line.startswith("diff "):
-            continue
-        if line.startswith("+"):
-            lines.append({"n1": None, "n2": new_n, "type": "add", "text": line[1:]})
-            new_n += 1
-        elif line.startswith("-"):
-            lines.append({"n1": old_n, "n2": None, "type": "rem", "text": line[1:]})
-            old_n += 1
-        else:
-            lines.append({"n1": old_n, "n2": new_n, "type": "", "text": line[1:] if line.startswith(" ") else line})
-            old_n += 1
-            new_n += 1
-    return lines
 
 
 def build_graph(llm, reporter, runner=None, checkpointer=None):
@@ -431,41 +407,10 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 test_target = target_test or f"test_{slug}.py"
                 res = {**runner.run_path(workspace, target=test_target), "iterations": 0}
 
-                # Build files summary and diff
-                files = []
-                diff_by_file = {}
-                all_changed = sorted(list(modified_files | created_files))
-
-                for p in all_changed:
-                    diff_proc = subprocess.run(
-                        ["git", "diff", "--", p],
-                        cwd=workspace,
-                        capture_output=True,
-                        text=True,
-                    )
-                    diff_output = diff_proc.stdout.strip()
-                    if diff_output:
-                        parsed_lines = _parse_diff_lines(diff_output)
-                        adds = sum(1 for ln in parsed_lines if ln["type"] == "add")
-                        rems = sum(1 for ln in parsed_lines if ln["type"] == "rem")
-                        files.append({"path": p, "add": adds, "rem": rems})
-                        diff_by_file[p] = {"file": p, "add": adds, "rem": rems, "lines": parsed_lines}
-                    else:
-                        try:
-                            file_content = tools.read_file(p)
-                            lns = file_content.splitlines()
-                            files.append({"path": p, "add": len(lns), "rem": 0})
-                            diff_by_file[p] = {
-                                "file": p,
-                                "add": len(lns),
-                                "rem": 0,
-                                "lines": [
-                                    {"n1": None, "n2": i + 1, "type": "add", "text": ln}
-                                    for i, ln in enumerate(lns)
-                                ],
-                            }
-                        except Exception:
-                            files.append({"path": p, "add": 1, "rem": 0})
+                # Build files summary and diff (same hardened diff the MCP path uses)
+                all_changed = sorted(modified_files | created_files)
+                files, full_diff = diff_artifacts(workspace_diff(workspace))
+                diff_by_file = full_diff["by_file"] if full_diff else {}
 
                 main_file = all_changed[0] if all_changed else f"{slug}.py"
                 main_diff = diff_by_file.get(main_file)
@@ -526,15 +471,10 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
     def gate(gate_key, role, on_approve):
         def node(state):
             payload = interrupt({"gate": gate_key, "role": role})
-            if isinstance(payload, dict):
-                decision = payload.get("decision", "approve")
-                feedback = payload.get("feedback", "")
-            else:
-                decision = str(payload)
-                feedback = ""
+            decision, feedback, actor = _read_decision(payload, role)
 
             if decision == "reject":
-                reporter.audit(state["run_id"], f"{gate_key}.rejected", role, {"feedback": feedback} if feedback else {})
+                reporter.audit(state["run_id"], f"{gate_key}.rejected", actor, {"feedback": feedback} if feedback else {})
                 if feedback:
                     reporter.phase(state["run_id"], gate_key, state="rejected", status="Rework Requested", at=now_label())
                     reporter.run(state["run_id"], status="running", gate=None)
@@ -542,37 +482,32 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 reporter.phase(state["run_id"], gate_key, state="rejected", status="Rejected", at=now_label())
                 reporter.run(state["run_id"], status="rejected", gate=None)
                 return {"status": "rejected"}
-            on_approve(state)
+            on_approve(state, actor)
             return {"status": "running", "feedback": None}
         return node
 
-    def approve_g1(state):
+    def approve_g1(state, actor):
         reporter.phase(state["run_id"], "g1", state="approved", status="Approved", at=now_label())
-        reporter.audit(state["run_id"], "g1.approved", "Planner")
+        reporter.audit(state["run_id"], "g1.approved", actor)
         reporter.run(state["run_id"], status="running", gate=None)
 
-    def approve_g2(state):
+    def approve_g2(state, actor):
         reporter.phase(state["run_id"], "g2", state="approved", status="Approved", at=now_label())
-        reporter.audit(state["run_id"], "g2.approved", "Engineer")
+        reporter.audit(state["run_id"], "g2.approved", actor)
         reporter.run(state["run_id"], status="running", gate=None)
 
-    def approve_final(state):
+    def approve_final(state, actor):
         reporter.phase(state["run_id"], "code", state="approved", status="Approved", at=now_label())
         reporter.phase(state["run_id"], "out", state="approved", status="Complete", at=now_label())
-        reporter.audit(state["run_id"], "code.approved", "Engineer")
+        reporter.audit(state["run_id"], "code.approved", actor)
         reporter.run(state["run_id"], status="approved", gate=None)
 
     def final_gate(state):
         payload = interrupt({"gate": "code", "role": "Engineer"})
-        if isinstance(payload, dict):
-            decision = payload.get("decision", "approve")
-            feedback = payload.get("feedback", "")
-        else:
-            decision = str(payload)
-            feedback = ""
+        decision, feedback, actor = _read_decision(payload, "Engineer")
 
         if decision == "reject":
-            reporter.audit(state["run_id"], "code.rejected", "Engineer", {"feedback": feedback} if feedback else {})
+            reporter.audit(state["run_id"], "code.rejected", actor, {"feedback": feedback} if feedback else {})
             if feedback:
                 reporter.phase(state["run_id"], "code", state="rejected", status="Rework Requested", at=now_label())
                 reporter.run(state["run_id"], status="running", gate=None)
@@ -580,7 +515,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
             reporter.phase(state["run_id"], "code", state="rejected", status="Rejected", at=now_label())
             reporter.run(state["run_id"], status="rejected", gate=None)
             return {"status": "rejected"}
-        approve_final(state)
+        approve_final(state, actor)
         return {"status": "approved", "feedback": None}
 
     def route_g1(state):
@@ -655,15 +590,60 @@ def start_run(app, run_id: str, brief: str, repo: str = "", branch: str = "") ->
     ))
 
 
-def resume_run(app, run_id: str, decision: str | dict, feedback: str = "") -> dict:
-    # Guard: if this run was never started here (no checkpoint), don't crash by
-    # re-running the graph with empty state. Signal so the caller can fall back.
-    snap = app.get_state(cfg(run_id))
-    # A genuinely-paused pipeline carries run_id in state and has a pending node
-    # to run next. Anything else (never started, or a stale/partial checkpoint
-    # from a prior crash) must not be re-invoked, or it runs from START with
-    # empty state and crashes.
-    if not snap.values.get("run_id") or not snap.next:
-        return {"resumed": False, "reason": "no active pipeline for this run"}
-    payload = {"decision": decision, "feedback": feedback} if (feedback or isinstance(decision, dict)) else decision
-    return {"resumed": True, **summarize(app.invoke(Command(resume=payload), cfg(run_id)))}
+def _read_decision(payload, role: str) -> tuple[str, str, str]:
+    """(decision, feedback, actor) from a resume payload. The actor is the
+    reviewer the backend authenticated; without one, the gate's role is used."""
+    if isinstance(payload, dict):
+        return payload.get("decision", "approve"), payload.get("feedback", ""), payload.get("actor") or role
+    return str(payload), "", role
+
+
+# One lock per run, so checking the paused gate and resuming it happen as one
+# step even when two resume calls arrive at the same time.
+_resume_locks: dict[str, threading.Lock] = {}
+_resume_locks_guard = threading.Lock()
+
+
+def _run_lock(run_id: str) -> threading.Lock:
+    with _resume_locks_guard:
+        return _resume_locks.setdefault(run_id, threading.Lock())
+
+
+def _pending_gate(snap) -> str | None:
+    """The gate key (g1 / g2 / code) the run is paused at, if any."""
+    for task in snap.tasks:
+        for intr in getattr(task, "interrupts", None) or ():
+            value = getattr(intr, "value", None)
+            if isinstance(value, dict):
+                return value.get("gate")
+    return None
+
+
+def resume_run(app, run_id: str, decision: str | dict, feedback: str = "", *,
+               gate: str | None = None, actor: str = "") -> dict:
+    """Resume a paused gate.
+
+    gate:  the gate the reviewer decided. If the run is paused somewhere else
+           (an earlier decision already moved it on), nothing is resumed and
+           reason is "stale_gate", so a repeated Approve cannot land on the
+           next gate.
+    actor: the reviewer, as authenticated by the backend, for the audit log.
+    """
+    with _run_lock(run_id):
+        # Guard: if this run was never started here (no checkpoint), don't crash by
+        # re-running the graph with empty state. Signal so the caller can fall back.
+        snap = app.get_state(cfg(run_id))
+        # A genuinely-paused pipeline carries run_id in state and has a pending node
+        # to run next. Anything else (never started, or a stale/partial checkpoint
+        # from a prior crash) must not be re-invoked, or it runs from START with
+        # empty state and crashes.
+        if not snap.values.get("run_id") or not snap.next:
+            return {"resumed": False, "reason": "not_running", "detail": "no active pipeline for this run"}
+        pending = _pending_gate(snap)
+        if gate and pending != gate:
+            return {"resumed": False, "reason": "stale_gate", "gate": pending}
+        if feedback or actor or isinstance(decision, dict):
+            payload = {"decision": decision, "feedback": feedback, "actor": actor}
+        else:
+            payload = decision
+        return {"resumed": True, **summarize(app.invoke(Command(resume=payload), cfg(run_id)))}
