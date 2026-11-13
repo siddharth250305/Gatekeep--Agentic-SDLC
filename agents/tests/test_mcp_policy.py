@@ -143,3 +143,54 @@ def test_get_phase_permissions_invalid_phase():
         engine.get_phase_permissions("unknown_phase")
 
 
+
+
+# ── D1: git metadata is off limits ───────────────────────────────────────
+
+@pytest.mark.parametrize("path", [".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".GIT/config", ".git"])
+def test_git_metadata_is_blocked(path):
+    engine = PolicyEngine()
+    assert engine.check_file_access(path, write=True).allowed is False
+    assert engine.check_file_access(path, write=False).allowed is False
+
+
+@pytest.mark.parametrize("path", [".gitignore", ".github/workflows/ci.yml", "src/git_utils.py"])
+def test_git_lookalike_names_are_allowed(path):
+    assert PolicyEngine().check_file_access(path, write=True).allowed is True
+
+
+@pytest.mark.parametrize("path", ["a\\..\\b.py", "sub\\.env"])
+def test_backslash_paths_are_checked_like_slash_paths(path):
+    assert PolicyEngine().check_file_access(path).allowed is False
+
+
+# ── B0: no active phase means deny, not "requirements" ──────────────────
+
+def _steps(*states):
+    keys = ["req", "g1", "design", "g2", "code", "out"]
+    return {"steps": [{"key": k, "state": s} for k, s in zip(keys, states)]}
+
+
+def test_current_phase_is_the_active_step():
+    run = _steps("approved", "approved", "active", "pending", "pending", "pending")
+    assert PolicyEngine.current_phase(run) == "design"
+
+
+def test_current_phase_of_a_fresh_run_is_requirements():
+    run = _steps("pending", "pending", "pending", "pending", "pending", "pending")
+    assert PolicyEngine.current_phase(run) == "req"
+
+
+@pytest.mark.parametrize("states", [
+    ("approved", "approved", "approved", "rejected", "pending", "pending"),   # rejected at Gate 2
+    ("approved", "approved", "approved", "approved", "approved", "approved"), # finished
+])
+def test_current_phase_of_a_rejected_or_finished_run_is_none(states):
+    # Before B0 these fell back to "req", which let the agent resubmit
+    # requirements and later skip the rejected design.
+    assert PolicyEngine.current_phase(_steps(*states)) is None
+
+
+def test_current_phase_of_a_malformed_run_is_none():
+    assert PolicyEngine.current_phase({}) is None
+    assert PolicyEngine.current_phase({"steps": []}) is None

@@ -9,6 +9,8 @@ async function json(res) {
 export const api = {
   base: BASE,
 
+  health: () => fetch(`${BASE}/health`).then(json),
+
   listRuns: () => fetch(`${BASE}/runs`).then(json),
 
   createRun: (body) =>

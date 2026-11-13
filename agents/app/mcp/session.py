@@ -6,6 +6,7 @@ Sessions are validated against the Node backend on creation and audit-logged.
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -13,6 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+from ..workspace import validate_run_id
+
+log = logging.getLogger("gatekeep.mcp")
 
 # Absolute root for workspaces so paths resolve correctly regardless of cwd.
 _WORKSPACES = Path(__file__).resolve().parent.parent.parent / "workspaces"
@@ -45,6 +50,7 @@ class SessionManager:
         client: str | None = None,
     ) -> McpSession:
         """Create and register a new MCP session, validating the run exists."""
+        validate_run_id(run_id)
         provider = provider or os.getenv("MCP_PROVIDER", "claude")
         client = client or os.getenv("MCP_CLIENT", "claude-desktop")
 
@@ -91,7 +97,7 @@ class SessionManager:
                     timeout=5.0,
                 )
             except Exception as exc:
-                print(f"[mcp] record_tool_call warning: {exc}")
+                log.warning("record_tool_call warning: %s", exc)
 
     def auto_register_startup(self) -> McpSession | None:
         """On agent startup, bind to the active/awaiting run so the UI shows connection immediately."""
@@ -103,7 +109,7 @@ class SessionManager:
                     target = next((r for r in runs if r.get("status") == "awaiting_gate"), runs[0])
                     return self.create_session(target["id"])
         except Exception as exc:
-            print(f"[mcp] auto-register warning: {exc}")
+            log.warning("auto-register warning: %s", exc)
         return None
 
     def get_session(self, session_id: str) -> McpSession | None:
@@ -133,7 +139,7 @@ class SessionManager:
                 "model": session.model,
             }, timeout=10.0)
         except Exception as exc:
-            print(f"[mcp] session registration warning: {exc}")
+            log.warning("session registration warning: %s", exc)
 
         try:
             # Audit log entry
@@ -146,4 +152,4 @@ class SessionManager:
                 },
             }, timeout=10.0)
         except Exception as exc:
-            print(f"[mcp] audit registration warning: {exc}")
+            log.warning("audit registration warning: %s", exc)

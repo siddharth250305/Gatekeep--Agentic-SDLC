@@ -19,6 +19,8 @@ class WorkspaceTools:
         root = str(self.root)
         if str(p) != root and not str(p).startswith(root + os.sep):
             raise ValueError("path escapes the workspace")
+        if any(part.lower() == ".git" for part in p.relative_to(self.root).parts):
+            raise ValueError("path is inside .git")
         return p
 
     def list_files(self) -> list[str]:

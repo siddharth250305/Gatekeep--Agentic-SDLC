@@ -15,7 +15,7 @@ External LLM Client (Claude / Cursor / Other)
 │  • Session ↔ Run Binding                     │
 │  • Phase-Aware Policy Enforcement            │
 │  • Security Globs & Path Traversal Guard     │
-│  • 18 Governed Tools                         │
+│  • 20 Governed Tools                         │
 └──────────────────────┬───────────────────────┘
                        │
         ┌──────────────┴──────────────┐
@@ -45,7 +45,7 @@ In a separate terminal or service manager:
 cd agents
 .venv/bin/python -m app.mcp.server
 ```
-The MCP server listens on `http://0.0.0.0:8078/sse`.
+The MCP server listens on `http://127.0.0.1:8078/sse` (this machine only). Set `GATEKEEP_MCP_HOST` or pass `--host` to expose it on another interface.
 
 ---
 
@@ -83,7 +83,7 @@ claude mcp add gatekeep -- python3 -m app.mcp.server
 
 ---
 
-## 3. The 18 Governed Tools
+## 3. The 20 Governed Tools
 
 | Tool | Permitted Phase | Function |
 |---|---|---|
@@ -100,7 +100,7 @@ claude mcp add gatekeep -- python3 -m app.mcp.server
 | `gatekeep_apply_patch` | `code` | Surgical find-and-replace modification |
 | `gatekeep_write_file` | `code` | Controlled file write/overwrite inside workspace |
 | `gatekeep_get_diff` | `code` | Extract git diff of unstaged/staged modifications |
-| `gatekeep_run_tests` | `code` | Trigger Pytest execution inside air-gapped Docker container |
+| `gatekeep_run_tests` | `code` | Trigger Pytest execution inside a no-network Docker container |
 | `gatekeep_get_test_results` | `code` | Fetch latest container execution output and assertion count |
 | `gatekeep_request_approval` | All | Request human review from the assigned role |
 | `gatekeep_get_approval_status` | All | Check whether the active gate has been approved or rework requested |

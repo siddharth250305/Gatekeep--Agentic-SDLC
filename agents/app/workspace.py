@@ -2,12 +2,14 @@
 actual code, not canned samples.
 
 Public repos need no auth. For private repos, set GIT_TOKEN (a GitHub PAT) in
-the agent's environment; it is injected into the clone URL and never logged or
-stored.
+the agent's environment. It is handed to git as a one-off config value through
+the environment, so it never appears in the process arguments, in error
+messages, or in the workspace's .git/config (which the agent could read).
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -17,6 +19,16 @@ from pathlib import Path
 WORKSPACES = Path(__file__).resolve().parent.parent / "workspaces"
 
 _OWNER_REPO = re.compile(r"^[\w.-]+/[\w.-]+$")
+# Run ids become directory names under WORKSPACES, so they must never contain
+# path separators or dot segments.
+_RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_run_id(run_id: str) -> str:
+    """Return run_id unchanged, or raise ValueError if it is unsafe as a directory name."""
+    if not isinstance(run_id, str) or not _RUN_ID.match(run_id):
+        raise ValueError(f"Invalid run id {run_id!r}: use letters, digits, '-' or '_' (max 64)")
+    return run_id
 
 
 def is_git_url(repo: str | None) -> bool:
@@ -29,11 +41,21 @@ def is_git_url(repo: str | None) -> bool:
     return os.path.isdir(os.path.join(repo, ".git"))
 
 
-def _clone_url(repo: str, token: str | None) -> str:
-    url = f"https://github.com/{repo}.git" if _OWNER_REPO.match(repo) else repo
-    if token and url.startswith("https://"):
-        url = url.replace("https://", f"https://{token}@", 1)
-    return url
+def _clone_url(repo: str) -> str:
+    return f"https://github.com/{repo}.git" if _OWNER_REPO.match(repo) else repo
+
+
+def _git_env(url: str, token: str | None) -> dict[str, str]:
+    """Environment for git clone. The token is only ever sent to github.com."""
+    env = dict(os.environ)
+    if token and url.startswith("https://github.com/"):
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        })
+    return env
 
 
 def fetch_repo(run_id: str, repo: str, branch: str | None = None,
@@ -44,7 +66,7 @@ def fetch_repo(run_id: str, repo: str, branch: str | None = None,
     if not is_git_url(repo):
         return None
 
-    dest = WORKSPACES / run_id
+    dest = WORKSPACES / validate_run_id(run_id)
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -52,8 +74,10 @@ def fetch_repo(run_id: str, repo: str, branch: str | None = None,
     args = ["git", "clone", "--depth", "1", "--single-branch"]
     if branch:
         args += ["--branch", branch]
-    args += [_clone_url(repo, token), str(dest)]
-    subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=True)
+    url = _clone_url(repo)
+    args += [url, str(dest)]
+    subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=True,
+                   env=_git_env(url, token))
 
     commit = subprocess.run(
         ["git", "-C", str(dest), "rev-parse", "--short", "HEAD"],

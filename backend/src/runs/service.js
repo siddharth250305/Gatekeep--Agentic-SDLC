@@ -110,7 +110,7 @@ export async function getRun(db, runId) {
     : null
   const tests =
     tr && tr.total != null
-      ? { passed: tr.passed, failed: tr.failed, total: tr.total, iterations: tr.iterations, duration: fmtDuration(tr.duration_ms), output: tr.output ?? null }
+      ? { status: tr.status ?? null, passed: tr.passed, failed: tr.failed, total: tr.total, iterations: tr.iterations, duration: fmtDuration(tr.duration_ms), output: tr.output ?? null }
       : null
 
   const artRes = await db.query('SELECT files, diff, summary, requirements, design, comments FROM run_artifacts WHERE run_id = $1', [runId])

@@ -120,3 +120,14 @@ def test_tools_are_workspace_scoped(repo):
     r = t.apply_patch("health.py", "return 'ok'", "return 'healthy'")
     assert r["applied"] is True
     assert "healthy" in t.read_file("health.py")
+
+
+# ── D1: the workspace tools refuse .git ──────────────────────────────────
+
+@pytest.mark.parametrize("path", [".git/config", "pkg/.git/HEAD", ".GIT/config"])
+def test_workspace_tools_refuse_git_metadata(tmp_path, path):
+    tools = WorkspaceTools(str(tmp_path))
+    with pytest.raises(ValueError):
+        tools.write_file(path, "[core]\n\tfsmonitor = /tmp/evil.sh\n")
+    with pytest.raises(ValueError):
+        tools.read_file(path)

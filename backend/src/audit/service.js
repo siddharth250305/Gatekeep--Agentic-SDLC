@@ -23,10 +23,41 @@ function toEvent(row) {
 // multi-writer safety, wrap this in a transaction with
 // `SELECT pg_advisory_xact_lock(hashtext($run_id))`. Omitted for v1 so the same
 // code runs under pg-mem in tests.
+// Postgres stores event / actor / created_at as TEXT. Hashing a number or an
+// object and then storing its string form would break verification forever, so
+// only accept the exact types that round-trip unchanged.
+const MAX_TEXT = 200
+
+function requireText(name, value) {
+  if (typeof value !== 'string' || value.trim() === '') throw new Error(`${name} must be a non-empty string`)
+  if (value.length > MAX_TEXT) throw new Error(`${name} must be at most ${MAX_TEXT} characters`)
+}
+
+// "__proto__" keys do not survive object building the same way on every path,
+// so they could slip out of the hash. Reject them anywhere in the payload.
+function hasProtoKey(value) {
+  if (Array.isArray(value)) return value.some(hasProtoKey)
+  if (value && typeof value === 'object') {
+    return Object.keys(value).some((k) => k === '__proto__' || hasProtoKey(value[k]))
+  }
+  return false
+}
+
+export function validateEvent({ runId, event, actor, payload = {}, createdAt } = {}) {
+  requireText('runId', runId)
+  requireText('event', event)
+  requireText('actor', actor)
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('payload must be a JSON object')
+  }
+  if (hasProtoKey(payload)) throw new Error('payload must not contain "__proto__" keys')
+  if (createdAt !== undefined && (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt)))) {
+    throw new Error('createdAt must be an ISO date string')
+  }
+}
+
 export async function appendEvent(db, { runId, event, actor, payload = {}, createdAt } = {}) {
-  if (!runId) throw new Error('runId is required')
-  if (!event) throw new Error('event is required')
-  if (!actor) throw new Error('actor is required')
+  validateEvent({ runId, event, actor, payload, createdAt })
 
   const tail = await db.query(
     'SELECT seq, hash FROM audit_events WHERE run_id = $1 ORDER BY seq DESC LIMIT 1',

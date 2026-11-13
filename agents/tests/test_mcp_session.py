@@ -89,3 +89,13 @@ def test_multiple_sessions():
         assert s1.session_id != s2.session_id
         assert sm.get_session(s1.session_id) == s1
         assert sm.get_session(s2.session_id) == s2
+
+
+@pytest.mark.parametrize("run_id", ["..", "../agents", "a/b"])
+def test_create_session_rejects_unsafe_run_ids_before_calling_backend(run_id):
+    """D6: run ids become workspace folder names."""
+    sm = SessionManager(base_url="http://test-backend")
+    with patch("httpx.get") as get:
+        with pytest.raises(ValueError, match="Invalid run id"):
+            sm.create_session(run_id)
+    get.assert_not_called()

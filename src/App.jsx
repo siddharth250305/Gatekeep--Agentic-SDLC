@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Search, ChevronRight, ChevronDown, GitBranch, GitCommitHorizontal, Calendar, Ellipsis, CircleAlert, Plus, X, Zap,
-  LayoutDashboard, FileText, Code, ShieldCheck, ShieldAlert, Download, Copy, RefreshCw, Check, ArrowRight,
-  RotateCcw, Sparkles, Terminal, Sun, Moon
+  ChevronDown, GitBranch, Ellipsis, Plus, X, Zap, LayoutDashboard, FileText, Code, ShieldCheck, ShieldAlert,
+  Download, Copy, Check, Terminal, Sun, Moon,
 } from 'lucide-react'
-import { runs as demoRuns, REVIEWER } from './data/runs'
+import { REVIEWER } from './data/runs'
 import { api, connectRealtime } from './api'
 import CodeReview from './components/CodeReview'
 import OverviewDashboardView from './components/views/OverviewDashboardView'
@@ -12,8 +11,6 @@ import SpecsDesignView from './components/views/SpecsDesignView'
 import TestResultsView from './components/views/TestResultsView'
 import AuditLogView from './components/views/AuditLogView'
 import ReworkModal from './components/ReworkModal'
-
-const withExtras = (run) => run
 
 const NAV_TABS = [
   { key: 'overview', label: 'Overview', title: 'Overview Dashboard', Icon: LayoutDashboard },
@@ -118,6 +115,8 @@ export default function App() {
   const [mcpSessions, setMcpSessions] = useState([])
   const [mcpStats, setMcpStats] = useState(null)
   const [apiOnline, setApiOnline] = useState(true)
+  // Demo-only tools (the audit tamper test) appear only when the API says demo mode is on.
+  const [demoMode, setDemoMode] = useState(false)
   const [isDarkMode, setIsDarkMode] = useState(() => {
     try {
       if (typeof document !== 'undefined') {
@@ -179,7 +178,7 @@ export default function App() {
     try {
       const list = await api.listRuns()
       const full = await Promise.all(list.map((l) => api.getRun(l.id)))
-      setRuns(full.map(withExtras))
+      setRuns(full)
       setSelectedId((prev) => {
         const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
         const urlRunId = urlParams?.get('run')
@@ -209,6 +208,7 @@ export default function App() {
     refresh()
       .catch((e) => setErr(e.message))
       .finally(() => setLoading(false))
+    api.health().then((h) => setDemoMode(h.demoMode === true)).catch(() => setDemoMode(false))
   }, [refresh])
 
   useEffect(() => connectRealtime((msg) => {
@@ -250,30 +250,8 @@ export default function App() {
         : `${run.id}: rework requested. Feedback sent to agent.`)
       await refresh()
     } catch (e) {
-      if (e.message && (
-        e.message.toLowerCase().includes('gate is assigned') ||
-        e.message.toLowerCase().includes('role') ||
-        e.message.toLowerCase().includes('no active gate') ||
-        e.message.toLowerCase().includes('decision must be')
-      )) {
-        flash(e.message, 4500)
-        return
-      }
-      // Local demo fallback state update
-      setRuns((prev) =>
-        prev.map((r) => {
-          if (r.id === run.id) {
-            return {
-              ...r,
-              awaiting: decision !== 'approve',
-              status: decision === 'approve' ? 'approved' : 'rejected',
-              steps: r.steps.map((s) => (s.key === 'code' ? { ...s, state: decision === 'approve' ? 'approved' : 'rejected' } : s)),
-            }
-          }
-          return r
-        })
-      )
-      flash(decision === 'approve' ? `${run.id} approved (demo mode)` : `${run.id} rework requested (demo mode)`)
+      // Never show a decision the server did not record.
+      flash(`Decision NOT recorded for ${run.id}: ${e.message}`, 6000)
     }
   }
 
@@ -286,7 +264,8 @@ export default function App() {
       flash('Review comment recorded')
       await refresh()
     } catch (e) {
-      flash('Review comment saved locally')
+      flash(`Comment NOT saved: ${e.message}`, 5000)
+      throw e
     }
   }
 
@@ -296,7 +275,7 @@ export default function App() {
       flash('Comment deleted')
       await refresh()
     } catch (e) {
-      flash('Comment removed')
+      flash(`Comment NOT deleted: ${e.message}`, 5000)
     }
   }
 
@@ -316,22 +295,8 @@ export default function App() {
       setRunTab('overview')
       flash(`${created.id} created. Click "Run pipeline" to start the agents.`)
     } catch (e) {
-      // Fallback local creation
-      const mockId = `RUN-0${Math.floor(428 + Math.random() * 50)}`
-      const mockNew = {
-        ...demoRuns[0],
-        id: mockId,
-        brief: f.brief.trim(),
-        repo: f.repo?.trim() || 'commerce-core',
-        branch: f.branch?.trim() || 'feat/new-gate',
-        status: 'awaiting_gate',
-        awaiting: true,
-      }
-      setRuns((prev) => [mockNew, ...prev])
-      setSelectedId(mockId)
-      setNewRun(null)
-      setRunTab('overview')
-      flash(`${mockId} created. Pipeline initialized.`)
+      // Keep the form open so nothing typed is lost.
+      flash(`Run NOT created: ${e.message}`, 5000)
     }
   }
 
@@ -341,7 +306,7 @@ export default function App() {
       flash(`${run.id}: pipeline started. Container sandbox running...`)
       await refresh()
     } catch (e) {
-      flash(`${run.id}: test suite rerun triggered in sandbox`)
+      flash(`${run.id}: pipeline NOT started: ${e.message}`, 5000)
     }
   }
 
@@ -351,20 +316,7 @@ export default function App() {
       flash(`Rewrote audit event #${seq} directly in database. Cryptographic chain broken!`, 5000)
       await refresh()
     } catch (e) {
-      // Demo fallback tamper simulation
-      setRuns((prev) =>
-        prev.map((r) => {
-          if (r.id === run.id) {
-            return {
-              ...r,
-              verified: false,
-              verify: { valid: false, brokenAt: seq, storedHash: '7f9b2c140a8d', recomputedHash: '9a1c8f3e2b4d' },
-            }
-          }
-          return r
-        })
-      )
-      flash(`Simulated database modification at event #${seq}. Chain broken!`, 5000)
+      flash(`Tamper test failed: ${e.message}`, 5000)
     }
   }
 
@@ -682,7 +634,7 @@ export default function App() {
             onDeleteComment={handleDeleteComment}
             onDecide={decide}
             canAct={canAct}
-            onTamper={doTamper}
+            onTamper={demoMode ? doTamper : undefined}
             showInspector={true}
           />
         )}
@@ -698,7 +650,7 @@ export default function App() {
                 onRequestRework={() => setReworkModalOpen(true)}
                 onStartPipeline={startPipeline}
                 onNavigateTab={(tab) => handleTabChange(tab)}
-                onTamper={doTamper}
+                onTamper={demoMode ? doTamper : undefined}
                 mcpSessions={mcpSessions}
                 mcpStats={mcpStats}
                 onRefreshMcp={refresh}
@@ -734,7 +686,7 @@ export default function App() {
         {runTab === 'audit' && (
           <div className="flex-1 h-full overflow-y-auto bg-canvas p-6">
             <div className="mx-auto max-w-5xl">
-              <AuditLogView runs={runs} activeRun={run} onOpenRun={openRun} onTamper={doTamper} onRefresh={refresh} />
+              <AuditLogView runs={runs} activeRun={run} onOpenRun={openRun} onTamper={demoMode ? doTamper : undefined} onRefresh={refresh} />
             </div>
           </div>
         )}

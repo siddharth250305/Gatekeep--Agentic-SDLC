@@ -6,11 +6,13 @@ State-mutating operations are audit-logged through the backend."""
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -18,6 +20,7 @@ from ..repository.context import build_context
 from ..repository.security import is_sensitive_path
 from ..repository.tools import WorkspaceTools
 from ..sandbox import SandboxRunner
+from ..workspace import validate_run_id
 from .policy import PolicyEngine
 from .session import McpSession, SessionManager
 
@@ -29,6 +32,13 @@ _DIFF_SKIP = ("__pycache__/", ".pytest_cache/")
 # Per-file cap on diff lines sent to the dashboard.
 _MAX_DIFF_LINES = 3000
 
+# Workspaces hold untrusted repo content, so git must never run programs named
+# in the repo's own config (fsmonitor hooks, external diff, textconv drivers).
+_GIT_SAFE_CONFIG = ("-c", "core.fsmonitor=false")
+_GIT_SAFE_DIFF = ("--no-ext-diff", "--no-textconv")
+
+log = logging.getLogger("gatekeep.mcp")
+
 
 def workspace_diff(workspace: str) -> str:
     """`git diff HEAD` plus every new untracked file, so reviewers see all changes."""
@@ -36,16 +46,17 @@ def workspace_diff(workspace: str) -> str:
         return ""
 
     def git(*args: str) -> str:
-        proc = subprocess.run(["git", *args], cwd=workspace, capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(["git", *_GIT_SAFE_CONFIG, *args], cwd=workspace,
+                              capture_output=True, text=True, timeout=15)
         return proc.stdout
 
-    parts = [git("diff", "HEAD")]
+    parts = [git("diff", *_GIT_SAFE_DIFF, "HEAD")]
     untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
     for path in sorted(p for p in untracked if p):
         if any(skip in path for skip in _DIFF_SKIP) or is_sensitive_path(path):
             continue
         # --no-index exits 1 when the files differ, which is always the case here.
-        parts.append(git("diff", "--no-index", "--", "/dev/null", path))
+        parts.append(git("diff", *_GIT_SAFE_DIFF, "--no-index", "--", "/dev/null", path))
     return "".join(parts)
 
 
@@ -97,6 +108,23 @@ def diff_artifacts(diff_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]
     return files, {**first, "by_file": by_file}
 
 
+@contextmanager
+def _undo_on_failure(target: Path) -> Iterator[None]:
+    """Restore *target* to its previous bytes (or remove it) if the block raises.
+
+    Used so a file change whose audit entry cannot be written is rolled back:
+    nothing changes in the workspace without a record of it."""
+    before = target.read_bytes() if target.is_file() else None
+    try:
+        yield
+    except Exception:
+        if before is None:
+            target.unlink(missing_ok=True)
+        else:
+            target.write_bytes(before)
+        raise
+
+
 class GateKeepTools:
     """Wraps core GateKeep capabilities behind session-aware, audit-traced methods."""
 
@@ -116,7 +144,7 @@ class GateKeepTools:
 
     def _workspace_path(self, session: McpSession) -> str:
         """Resolve the absolute workspace directory for a session's run."""
-        return str(_WORKSPACES / session.run_id)
+        return str(_WORKSPACES / validate_run_id(session.run_id))
 
     def _get_workspace_tools(self, session_id: str) -> WorkspaceTools:
         """Create a WorkspaceTools instance scoped to the session's run workspace."""
@@ -151,8 +179,12 @@ class GateKeepTools:
         resp.raise_for_status()
         return resp.json()
 
-    def _audit(self, run_id: str, event: str, payload: dict[str, Any] | None = None) -> None:
-        """Append an audit event through the backend. Non-fatal on failure."""
+    def _audit(self, run_id: str, event: str, payload: dict[str, Any] | None = None,
+               required: bool = False) -> None:
+        """Append an audit event through the backend.
+
+        With required=True a failure raises, so the caller can undo the action
+        it is recording. Otherwise failures are logged and ignored."""
         try:
             self._backend_post(f"runs/{run_id}/audit", {
                 "event": event,
@@ -160,7 +192,9 @@ class GateKeepTools:
                 "payload": payload or {},
             })
         except Exception as exc:
-            print(f"[mcp] audit warning: {exc}")
+            if required:
+                raise RuntimeError(f"audit log unavailable, action was not applied: {exc}") from exc
+            log.warning("audit warning: %s", exc)
 
     # ── run / context ────────────────────────────────────────────────────
 
@@ -192,14 +226,12 @@ class GateKeepTools:
         """
         run = self.get_run(session_id)
 
-        # Determine active phase from the steps list
-        active_phase = "req"
-        for step in run.get("steps", []):
-            if step.get("state") == "active":
-                active_phase = step.get("key", "req")
-                break
-
-        phase_perms = self.policy.get_phase_permissions(active_phase)
+        active_phase = self.policy.current_phase(run)
+        if active_phase is None:
+            # Finished or rejected: nothing is allowed.
+            phase_perms = {"allowed_tools": [], "denied_tools": sorted(self.policy.TOOL_PERMISSIONS)}
+        else:
+            phase_perms = self.policy.get_phase_permissions(active_phase)
 
         return {
             "run_id": run.get("id"),
@@ -331,15 +363,21 @@ class GateKeepTools:
     def apply_patch(self, session_id: str, path: str, find: str, replace: str) -> dict[str, Any]:
         """Apply a surgical code edit in the workspace (find → replace)."""
         session = self._get_session(session_id)
-        result = self._get_workspace_tools(session_id).apply_patch(path, find, replace)
-        self._audit(session.run_id, "mcp.file.patched", {"path": path, "applied": result.get("applied")})
+        wt = self._get_workspace_tools(session_id)
+        with _undo_on_failure(wt._safe(path)):
+            result = wt.apply_patch(path, find, replace)
+            self._audit(session.run_id, "mcp.file.patched",
+                        {"path": path, "applied": result.get("applied")}, required=True)
         return result
 
     def write_file(self, session_id: str, path: str, content: str) -> dict[str, Any]:
         """Write or overwrite a file in the workspace."""
         session = self._get_session(session_id)
-        result = self._get_workspace_tools(session_id).write_file(path, content)
-        self._audit(session.run_id, "mcp.file.written", {"path": path, "bytes": result.get("bytes")})
+        wt = self._get_workspace_tools(session_id)
+        with _undo_on_failure(wt._safe(path)):
+            result = wt.write_file(path, content)
+            self._audit(session.run_id, "mcp.file.written",
+                        {"path": path, "bytes": result.get("bytes")}, required=True)
         return result
 
     def get_diff(self, session_id: str) -> str:
@@ -363,7 +401,7 @@ class GateKeepTools:
         # Report to backend
         try:
             self._backend_put(f"runs/{session.run_id}/tests", {
-                "status": "Passed" if result["failed"] == 0 else "Failed",
+                "status": result["status"],
                 "passed": result["passed"],
                 "failed": result["failed"],
                 "total": result["total"],
@@ -372,10 +410,12 @@ class GateKeepTools:
                 "output": result["output"][:8000],
             })
         except Exception as exc:
-            print(f"[mcp] test report warning: {exc}")
+            log.warning("test report warning: %s", exc)
 
         self._audit(session.run_id, "mcp.tests.run", {
             "target": target,
+            "status": result["status"],
+            "exit_code": result["exit_code"],
             "passed": result["passed"],
             "failed": result["failed"],
         })
@@ -404,7 +444,7 @@ class GateKeepTools:
         try:
             files, diff = diff_artifacts(workspace_diff(self._workspace_path(session)))
         except Exception as exc:
-            print(f"[mcp] diff warning: {exc}")
+            log.warning("diff warning: %s", exc)
             files, diff = [], None
         tests = run.get("tests") or {}
         checks = [f"{len(files)} file(s) changed: +{sum(f['add'] for f in files)} / -{sum(f['rem'] for f in files)}"]
@@ -462,7 +502,7 @@ class GateKeepTools:
         try:
             self._backend_patch(f"mcp/sessions/{session.session_id}", {"model": model})
         except Exception as exc:
-            print(f"[mcp] report_model warning: {exc}")
+            log.warning("report_model warning: %s", exc)
         return {"updated": True, "model": model}
 
     # ── private helpers ──────────────────────────────────────────────────

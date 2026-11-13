@@ -1,9 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import {
-  File, Copy, ExternalLink, Download, Check, Plus, MessageSquare, Trash, X, Send, Code,
-  RotateCcw, ShieldCheck, ShieldAlert, CircleCheck, ChevronRight, ChevronDown, Folder, FolderOpen, Terminal, Ellipsis,
-  ArrowRight, Sparkles, TriangleAlert, Search, GitBranch, GitCommitHorizontal, Split, Layers, Eye,
-  FileText, CornerDownRight
+  File, Copy, Download, Check, Plus, MessageSquare, X, Code, RotateCcw, ShieldCheck, ShieldAlert, ChevronDown,
+  Folder, TriangleAlert, Search, GitBranch, Eye,
 } from 'lucide-react'
 
 const KEYWORDS = new Set(['class','def','return','if','elif','else','for','while','in','import','from','as','with','try','except','raise','and','or','not','is','async','await','lambda','pass','yield','function','catch','self','let','const','var'])
@@ -34,283 +32,11 @@ function highlight(code) {
 }
 
 // =========================================================================
-// CODEBASE REGISTRY: Complete authentic project file tree for the IDE
-// =========================================================================
-const CODEBASE_FILES = {
-  // Modified files
-  'src/checkout/webhook.py': {
-    path: 'src/checkout/webhook.py',
-    name: 'webhook.py',
-    folder: 'src/checkout',
-    modified: true,
-    status: 'M',
-    add: 48,
-    rem: 6,
-    header: '@@ -40,4 +40,10 @@',
-    diffLines: [
-      { n1: 28, n2: 28, type: 'ctx', text: 'import hmac' },
-      { n1: 29, n2: 29, type: 'ctx', text: 'import hashlib' },
-      { n1: 30, n2: 30, type: 'ctx', text: 'from fastapi import APIRouter, Request, HTTPException, Depends' },
-      { n1: 31, n2: 31, type: 'ctx', text: 'from app.services.rate_limiter import check_rate_limit' },
-      { n1: 32, n2: 32, type: 'ctx', text: '' },
-      { n1: 33, n2: 33, type: 'ctx', text: 'router = APIRouter()' },
-      { n1: 34, n2: 34, type: 'ctx', text: '' },
-      { n1: 35, n2: 35, type: 'ctx', text: 'def verify_signature(payload: bytes, signature: str, secret: str) -> bool:' },
-      { n1: 36, n2: 36, type: 'ctx', text: '    mac = hmac.new(secret.encode(), payload, hashlib.sha256)' },
-      { n1: 37, n2: 37, type: 'ctx', text: '    return hmac.compare_digest(mac.hexdigest(), signature)' },
-      { n1: 38, n2: 38, type: 'ctx', text: '' },
-      { n1: 39, n2: 39, type: 'ctx', text: '@router.post("/v1/events/webhook")' },
-      { n1: 40, n2: null, type: 'rem', text: 'async def receive_webhook(request: Request):' },
-      { n1: 41, n2: null, type: 'rem', text: '    # Legacy unmetered webhook endpoint without HMAC verification' },
-      { n1: 42, n2: null, type: 'rem', text: '    payload = await request.json()' },
-      { n1: 43, n2: null, type: 'rem', text: '    return {"status": "accepted"}' },
-      { n1: null, n2: 40, type: 'add', text: 'async def receive_webhook(request: Request, db: Session = Depends(get_db)):' },
-      { n1: null, n2: 41, type: 'add', text: '    payload = await request.body()' },
-      { n1: null, n2: 42, type: 'add', text: '    rate_limit_key = f"rl:{request.headers.get(\'cf-connecting-ip\', request.client.host)}"' },
-      { n1: null, n2: 43, type: 'add', text: '    allowed, remaining = await check_rate_limit(rate_limit_key, limit=60, window_secs=60)' },
-      { n1: null, n2: 44, type: 'add', text: '    if not allowed:' },
-      { n1: null, n2: 45, type: 'add', text: '        raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": "60"})' },
-      { n1: null, n2: 46, type: 'add', text: '    sig = request.headers.get("X-GateKeep-Signature")' },
-      { n1: null, n2: 47, type: 'add', text: '    if not sig or not verify_signature(payload, sig, "whsec_live_prod"):' },
-      { n1: null, n2: 48, type: 'add', text: '        raise HTTPException(status_code=401, detail="Invalid cryptographic HMAC signature")' },
-      { n1: null, n2: 49, type: 'add', text: '    return {"status": "verified", "tenant": request.headers.get("X-Tenant-ID"), "remaining": remaining}' },
-      { n1: 44, n2: 50, type: 'ctx', text: '' },
-      { n1: 45, n2: 51, type: 'ctx', text: '@router.get("/v1/events/health")' },
-      { n1: 46, n2: 52, type: 'ctx', text: 'async def webhook_health():' },
-      { n1: 47, n2: 53, type: 'ctx', text: '    return {"status": "healthy", "service": "webhook-ingress"}' },
-    ],
-  },
-  'tests/test_webhook.py': {
-    path: 'tests/test_webhook.py',
-    name: 'test_webhook.py',
-    folder: 'tests',
-    modified: true,
-    status: 'A',
-    add: 15,
-    rem: 0,
-    header: '@@ -1,0 +1,15 @@',
-    diffLines: [
-      { n1: null, n2: 1, type: 'add', text: 'import pytest' },
-      { n1: null, n2: 2, type: 'add', text: 'from httpx import AsyncClient' },
-      { n1: null, n2: 3, type: 'add', text: 'from app.main import app' },
-      { n1: null, n2: 4, type: 'add', text: '' },
-      { n1: null, n2: 5, type: 'add', text: '@pytest.mark.asyncio' },
-      { n1: null, n2: 6, type: 'add', text: 'async def test_webhook_rate_limit_throttle():' },
-      { n1: null, n2: 7, type: 'add', text: '    async with AsyncClient(app=app, base_url="http://test") as ac:' },
-      { n1: null, n2: 8, type: 'add', text: '        headers = {"X-GateKeep-Signature": "valid_mock_sig", "X-Tenant-ID": "test_merchant"}' },
-      { n1: null, n2: 9, type: 'add', text: '        for _ in range(60):' },
-      { n1: null, n2: 10, type: 'add', text: '            res = await ac.post("/v1/events/webhook", json={"evt": "ping"}, headers=headers)' },
-      { n1: null, n2: 11, type: 'add', text: '            assert res.status_code == 200' },
-      { n1: null, n2: 12, type: 'add', text: '        # 61st request must trigger HTTP 429' },
-      { n1: null, n2: 13, type: 'add', text: '        res = await ac.post("/v1/events/webhook", json={"evt": "ping"}, headers=headers)' },
-      { n1: null, n2: 14, type: 'add', text: '        assert res.status_code == 429' },
-      { n1: null, n2: 15, type: 'add', text: '        assert res.headers["Retry-After"] == "60"' },
-    ],
-  },
-  'config/settings.py': {
-    path: 'config/settings.py',
-    name: 'settings.py',
-    folder: 'config',
-    modified: true,
-    status: 'M',
-    add: 4,
-    rem: 1,
-    header: '@@ -1,4 +1,7 @@',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: '# GateKeep Webhook & Throttle Runtime Configuration' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'GATEKEEP_ENVIRONMENT = "production"' },
-      { n1: null, n2: 3, type: 'add', text: 'RATE_LIMIT_ENABLED = True' },
-      { n1: null, n2: 4, type: 'add', text: 'RATE_LIMIT_DEFAULT_PER_MIN = 60' },
-      { n1: null, n2: 5, type: 'add', text: 'AIR_GAPPED_SANDBOX_ENFORCED = True' },
-      { n1: null, n2: 6, type: 'add', text: 'AUDIT_CHAIN_ALGORITHM = "SHA-256"' },
-      { n1: 3, n2: null, type: 'rem', text: 'RATE_LIMIT_ENABLED = False' },
-      { n1: 4, n2: 7, type: 'ctx', text: 'LOG_LEVEL = "INFO"' },
-    ],
-  },
-  'src/middleware/throttle.py': {
-    path: 'src/middleware/throttle.py',
-    name: 'throttle.py',
-    folder: 'src/middleware',
-    modified: true,
-    status: 'M',
-    add: 22,
-    rem: 4,
-    header: '@@ -12,4 +12,12 @@',
-    diffLines: [
-      { n1: 12, n2: 12, type: 'ctx', text: 'class SlidingWindowLimiter:' },
-      { n1: 13, n2: 13, type: 'ctx', text: '    def __init__(self, redis_client):' },
-      { n1: 14, n2: 14, type: 'ctx', text: '        self.redis = redis_client' },
-      { n1: 15, n2: null, type: 'rem', text: '    async def check(self, key: str, limit: int) -> bool:' },
-      { n1: 16, n2: null, type: 'rem', text: '        return True  # TODO: implement limiter' },
-      { n1: null, n2: 15, type: 'add', text: '    async def check(self, key: str, limit: int, window: int = 60) -> tuple[bool, int]:' },
-      { n1: null, n2: 16, type: 'add', text: '        now = int(time.time())' },
-      { n1: null, n2: 17, type: 'add', text: '        pipe = self.redis.pipeline()' },
-      { n1: null, n2: 18, type: 'add', text: '        pipe.zremrangebyscore(key, 0, now - window)' },
-      { n1: null, n2: 19, type: 'add', text: '        pipe.zadd(key, {str(now): now})' },
-      { n1: null, n2: 20, type: 'add', text: '        pipe.zcard(key)' },
-      { n1: null, n2: 21, type: 'add', text: '        pipe.expire(key, window)' },
-      { n1: null, n2: 22, type: 'add', text: '        res = await pipe.execute()' },
-      { n1: null, n2: 23, type: 'add', text: '        count = res[2]' },
-      { n1: null, n2: 24, type: 'add', text: '        return count <= limit, max(0, limit - count)' },
-      { n1: 17, n2: 25, type: 'ctx', text: '' },
-      { n1: 18, n2: 26, type: 'ctx', text: '    def format_key(self, tenant_id: str) -> str:' },
-      { n1: 19, n2: 27, type: 'ctx', text: '        return f"throttle:{tenant_id}"' },
-    ],
-  },
-  'src/deps/redis.py': {
-    path: 'src/deps/redis.py',
-    name: 'redis.py',
-    folder: 'src/deps',
-    modified: true,
-    status: 'M',
-    add: 12,
-    rem: 3,
-    header: '@@ -5,3 +5,10 @@',
-    diffLines: [
-      { n1: 5, n2: 5, type: 'ctx', text: 'import redis.asyncio as aioredis' },
-      { n1: 6, n2: null, type: 'rem', text: 'def get_redis():' },
-      { n1: 7, n2: null, type: 'rem', text: '    return aioredis.from_url("redis://localhost")' },
-      { n1: null, n2: 6, type: 'add', text: 'async def get_redis_pool() -> aioredis.Redis:' },
-      { n1: null, n2: 7, type: 'add', text: '    return aioredis.ConnectionPool.from_url(' },
-      { n1: null, n2: 8, type: 'add', text: '        settings.RATE_LIMIT_REDIS_URL,' },
-      { n1: null, n2: 9, type: 'add', text: '        max_connections=20,' },
-      { n1: null, n2: 10, type: 'add', text: '        decode_responses=True' },
-      { n1: null, n2: 11, type: 'add', text: '    )' },
-      { n1: 8, n2: 12, type: 'ctx', text: '' },
-    ],
-  },
-
-  // Clean codebase files (available to browse like an authentic IDE)
-  'src/checkout/service.py': {
-    path: 'src/checkout/service.py',
-    name: 'service.py',
-    folder: 'src/checkout',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: '# Checkout Event Processing Service' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'from app.models import Order, Payment' },
-      { n1: 3, n2: 3, type: 'ctx', text: 'from app.db import SessionLocal' },
-      { n1: 4, n2: 4, type: 'ctx', text: '' },
-      { n1: 5, n2: 5, type: 'ctx', text: 'async def dispatch_checkout_event(order_id: str, event_type: str):' },
-      { n1: 6, n2: 6, type: 'ctx', text: '    with SessionLocal() as session:' },
-      { n1: 7, n2: 7, type: 'ctx', text: '        order = session.query(Order).filter_by(id=order_id).first()' },
-      { n1: 8, n2: 8, type: 'ctx', text: '        if not order:' },
-      { n1: 9, n2: 9, type: 'ctx', text: '            raise ValueError(f"Order {order_id} not found")' },
-      { n1: 10, n2: 10, type: 'ctx', text: '        order.status = event_type' },
-      { n1: 11, n2: 11, type: 'ctx', text: '        session.commit()' },
-      { n1: 12, n2: 12, type: 'ctx', text: '        return {"order_id": order_id, "status": "processed"}' },
-    ],
-  },
-  'src/checkout/schemas.py': {
-    path: 'src/checkout/schemas.py',
-    name: 'schemas.py',
-    folder: 'src/checkout',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: 'from pydantic import BaseModel, Field' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'from typing import Optional, Dict, Any' },
-      { n1: 3, n2: 3, type: 'ctx', text: '' },
-      { n1: 4, n2: 4, type: 'ctx', text: 'class WebhookPayload(BaseModel):' },
-      { n1: 5, n2: 5, type: 'ctx', text: '    event: str = Field(..., description="Webhook event name")' },
-      { n1: 6, n2: 6, type: 'ctx', text: '    timestamp: int' },
-      { n1: 7, n2: 7, type: 'ctx', text: '    data: Dict[str, Any]' },
-      { n1: 8, n2: 8, type: 'ctx', text: '    tenant_id: Optional[str] = None' },
-    ],
-  },
-  'src/middleware/auth.py': {
-    path: 'src/middleware/auth.py',
-    name: 'auth.py',
-    folder: 'src/middleware',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: 'from fastapi import Security, HTTPException' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'from fastapi.security.api_key import APIKeyHeader' },
-      { n1: 3, n2: 3, type: 'ctx', text: '' },
-      { n1: 4, n2: 4, type: 'ctx', text: 'api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)' },
-      { n1: 5, n2: 5, type: 'ctx', text: '' },
-      { n1: 6, n2: 6, type: 'ctx', text: 'async def get_api_key(key: str = Security(api_key_header)):' },
-      { n1: 7, n2: 7, type: 'ctx', text: '    if not key:' },
-      { n1: 8, n2: 8, type: 'ctx', text: '        raise HTTPException(status_code=403, detail="Missing API Key")' },
-      { n1: 9, n2: 9, type: 'ctx', text: '    return key' },
-    ],
-  },
-  'tests/test_throttle.py': {
-    path: 'tests/test_throttle.py',
-    name: 'test_throttle.py',
-    folder: 'tests',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: 'import pytest' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'from app.middleware.throttle import SlidingWindowLimiter' },
-      { n1: 3, n2: 3, type: 'ctx', text: '' },
-      { n1: 4, n2: 4, type: 'ctx', text: 'def test_limiter_initialization():' },
-      { n1: 5, n2: 5, type: 'ctx', text: '    limiter = SlidingWindowLimiter(None)' },
-      { n1: 6, n2: 6, type: 'ctx', text: '    assert limiter is not None' },
-    ],
-  },
-  'tests/conftest.py': {
-    path: 'tests/conftest.py',
-    name: 'conftest.py',
-    folder: 'tests',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: 'import pytest' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'from unittest.mock import AsyncMock' },
-      { n1: 3, n2: 3, type: 'ctx', text: '' },
-      { n1: 4, n2: 4, type: 'ctx', text: '@pytest.fixture' },
-      { n1: 5, n2: 5, type: 'ctx', text: 'def mock_redis():' },
-      { n1: 6, n2: 6, type: 'ctx', text: '    mock = AsyncMock()' },
-      { n1: 7, n2: 7, type: 'ctx', text: '    mock.pipeline.return_value.execute.return_value = [1, 1, 10, 1]' },
-      { n1: 8, n2: 8, type: 'ctx', text: '    return mock' },
-    ],
-  },
-  'README.md': {
-    path: 'README.md',
-    name: 'README.md',
-    folder: '',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: '# Commerce Core API Service' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'High-throughput event ingress and webhook dispatch system governed by GateKeep.' },
-      { n1: 3, n2: 3, type: 'ctx', text: '' },
-      { n1: 4, n2: 4, type: 'ctx', text: '## Security & Governance' },
-      { n1: 5, n2: 5, type: 'ctx', text: '- All inbound webhooks verify HMAC-SHA256 signatures.' },
-      { n1: 6, n2: 6, type: 'ctx', text: '- Egress-isolated container execution verified on all PR builds.' },
-    ],
-  },
-  'pyproject.toml': {
-    path: 'pyproject.toml',
-    name: 'pyproject.toml',
-    folder: '',
-    modified: false,
-    status: 'clean',
-    diffLines: [
-      { n1: 1, n2: 1, type: 'ctx', text: '[project]' },
-      { n1: 2, n2: 2, type: 'ctx', text: 'name = "commerce-core"' },
-      { n1: 3, n2: 3, type: 'ctx', text: 'version = "2.4.0"' },
-      { n1: 4, n2: 4, type: 'ctx', text: 'dependencies = [' },
-      { n1: 5, n2: 5, type: 'ctx', text: '    "fastapi>=0.110.0",' },
-      { n1: 6, n2: 6, type: 'ctx', text: '    "redis>=5.0.0",' },
-      { n1: 7, n2: 7, type: 'ctx', text: '    "pytest>=8.0.0",' },
-      { n1: 8, n2: 8, type: 'ctx', text: ']' },
-    ],
-  },
-}
-
-// =========================================================================
 // RUN DIFF NORMALIZATION
 // run.diff arrives in three shapes: the GateKeep object ({file, lines, by_file}),
 // raw unified-diff text, or an array of per-file entries. All become
 // { files: [{path, status, add, rem}], linesByFile: {path: diffLines} }.
 // =========================================================================
-const DEMO_TABS = ['src/checkout/webhook.py', 'tests/test_webhook.py', 'config/settings.py', 'src/middleware/throttle.py']
-
 function parseUnifiedDiff(text) {
   const byFile = {}
   let cur = null
@@ -389,10 +115,10 @@ export default function CodeReview({
   const realFiles = runDiff.files
   const hasRealFiles = realFiles.length > 0
 
-  const [selectedFilePath, setSelectedFilePath] = useState(() => (hasRealFiles ? realFiles[0].path : DEMO_TABS[0]))
+  const [selectedFilePath, setSelectedFilePath] = useState(() => (hasRealFiles ? realFiles[0].path : ''))
 
   // IDE Open Tabs across the codebase
-  const [openTabs, setOpenTabs] = useState(() => (hasRealFiles ? realFiles.slice(0, 4).map((f) => f.path) : DEMO_TABS))
+  const [openTabs, setOpenTabs] = useState(() => (hasRealFiles ? realFiles.slice(0, 4).map((f) => f.path) : []))
 
   // Quick Open Modal (⌘P)
   const [quickOpenOpen, setQuickOpenOpen] = useState(false)
@@ -404,7 +130,6 @@ export default function CodeReview({
   // Comment state
   const [activeCommentLine, setActiveCommentLine] = useState(null)
   const [commentText, setCommentText] = useState('')
-  const [anchoredCardDismissed, setAnchoredCardDismissed] = useState(false)
 
   // Explorer search & folder expansion
   const [explorerFilter, setExplorerFilter] = useState('')
@@ -443,9 +168,9 @@ export default function CodeReview({
     return () => window.removeEventListener('click', closeMenu)
   }, [])
 
-  // A run with recorded files shows only those files; the demo codebase is for runs without any.
+  // Only the files this run actually changed. A run with no changes shows an empty explorer.
   const allCodebaseFiles = useMemo(() => {
-    if (!hasRealFiles) return { ...CODEBASE_FILES }
+    if (!hasRealFiles) return {}
     const registry = {}
     realFiles.forEach((rf) => {
       const lines = runDiff.linesByFile[rf.path]
@@ -467,8 +192,8 @@ export default function CodeReview({
   // Open the run's own files when switching to a run that has them.
   useEffect(() => {
     if (!hasRealFiles) {
-      setSelectedFilePath(DEMO_TABS[0])
-      setOpenTabs(DEMO_TABS)
+      setSelectedFilePath('')
+      setOpenTabs([])
       return
     }
     const paths = realFiles.map((f) => f.path)
@@ -503,7 +228,7 @@ export default function CodeReview({
     name: '',
     folder: '',
     status: 'clean',
-    diffLines: [],
+    diffLines: [{ n1: null, n2: null, type: 'ctx', text: 'No code changes recorded for this run yet.' }],
   }
   const diffLines = activeFile.diffLines || []
 
@@ -562,29 +287,19 @@ export default function CodeReview({
     URL.revokeObjectURL(url)
   }
 
-  // Submit to Agent Rework from line 42 anchored card
-  const handleReworkFromCard = () => {
-    if (onDecide) {
-      onDecide(
-        'reject',
-        'Line 42: Rate limiter key should use hashed tenant ID instead of raw IP to prevent spoofing behind Cloudflare proxies.'
-      )
-    }
-  }
-
-  // Custom user line comment
-  const handleSubmitCustomLineComment = (lineNo) => {
-    if (!commentText.trim()) return
-    if (onAddComment) {
-      onAddComment({
+  // Saving a line comment only saves the comment. Rejecting the gate is a
+  // separate, deliberate action ("Request changes"), which sends these comments.
+  const handleSubmitCustomLineComment = async (lineNo) => {
+    if (!commentText.trim() || !onAddComment) return
+    try {
+      await onAddComment({
         line: lineNo,
         file: activeFile.path,
         text: commentText.trim(),
         role: reviewerRole,
       })
-    }
-    if (onDecide) {
-      onDecide('reject', `Line ${lineNo} (${activeFile.path}): ${commentText.trim()}`)
+    } catch {
+      return // keep the draft so nothing typed is lost; the error toast explains why
     }
     setActiveCommentLine(null)
     setCommentText('')
@@ -634,7 +349,7 @@ export default function CodeReview({
                   <Check size={12} />
                 </div>
                 <div className="mt-1 border-t border-black/[0.04] pt-1 text-[11px] text-faint px-2.5 py-1 dark:border-white/[0.06] dark:text-[#8e8e93]">
-                  Commit: {run?.commit || (hasRealFiles ? 'not shipped yet' : '9f3c2e1')}
+                  Commit: {run?.commit || 'not shipped yet'}
                 </div>
               </div>
             )}
@@ -651,7 +366,7 @@ export default function CodeReview({
               title="Git Branch"
             >
               <GitBranch size={12} className="text-accent shrink-0" />
-              <span className="truncate max-w-[130px]">{run?.branch || (hasRealFiles ? 'main' : 'feat/webhook-throttle')}</span>
+              <span className="truncate max-w-[130px]">{run?.branch || 'main'}</span>
               <ChevronDown size={11} className="text-faint dark:text-[#8e8e93]" />
             </button>
             {activeDropdown === 'branch' && (
@@ -660,7 +375,7 @@ export default function CodeReview({
                   Branches
                 </div>
                 <div className="rounded-lg bg-accent/10 px-2.5 py-1.5 font-semibold text-accent flex items-center justify-between">
-                  <span>{run?.branch || (hasRealFiles ? 'main' : 'feat/webhook-throttle')}</span>
+                  <span>{run?.branch || 'main'}</span>
                   <span className="font-mono text-[10px] text-accent">HEAD</span>
                 </div>
                 <div className="rounded-lg px-2.5 py-1.5 text-muted hover:bg-black/[0.03] transition-colors dark:text-[#a1a1aa] dark:hover:bg-white/[0.05]">
@@ -924,257 +639,9 @@ export default function CodeReview({
                 ))}
               </div>
             ) : (
-              /* Project Root Folder */
-              <div className="space-y-0.5">
-              {/* src folder */}
-              <div>
-                <button
-                  type="button"
-                  onClick={() => toggleFolder('src')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
-                >
-                  <ChevronDown size={12} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src') ? '' : '-rotate-90'}`} />
-                  <Folder size={13} className="text-accent" />
-                  <span className="font-sans font-semibold">src</span>
-                </button>
-
-                {expandedFolders.has('src') && (
-                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
-                    {/* checkout subfolder */}
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => toggleFolder('src/checkout')}
-                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
-                      >
-                        <ChevronDown size={11} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src/checkout') ? '' : '-rotate-90'}`} />
-                        <Folder size={12} className="text-accent/80" />
-                        <span className="font-sans">checkout</span>
-                      </button>
-                      {expandedFolders.has('src/checkout') && (
-                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
-                          {['src/checkout/webhook.py', 'src/checkout/service.py', 'src/checkout/schemas.py'].map((path) => {
-                            const f = allCodebaseFiles[path]
-                            if (!f) return null
-                            const isSelected = selectedFilePath === f.path
-                            return (
-                              <button
-                                key={f.path}
-                                type="button"
-                                onClick={() => handleOpenFile(f.path)}
-                                className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                                  isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
-                                }`}
-                              >
-                                <div className="flex items-center gap-1.5 truncate">
-                                  <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
-                                  <span className="truncate">{f.name}</span>
-                                </div>
-                                {f.modified && (
-                                  <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
-                                    +{f.add}
-                                  </span>
-                                )}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* middleware subfolder */}
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => toggleFolder('src/middleware')}
-                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
-                      >
-                        <ChevronDown size={11} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src/middleware') ? '' : '-rotate-90'}`} />
-                        <Folder size={12} className="text-accent/80" />
-                        <span className="font-sans">middleware</span>
-                      </button>
-                      {expandedFolders.has('src/middleware') && (
-                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
-                          {['src/middleware/throttle.py', 'src/middleware/auth.py'].map((path) => {
-                            const f = allCodebaseFiles[path]
-                            if (!f) return null
-                            const isSelected = selectedFilePath === f.path
-                            return (
-                              <button
-                                key={f.path}
-                                type="button"
-                                onClick={() => handleOpenFile(f.path)}
-                                className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                                  isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
-                                }`}
-                              >
-                                <div className="flex items-center gap-1.5 truncate">
-                                  <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
-                                  <span className="truncate">{f.name}</span>
-                                </div>
-                                {f.modified && (
-                                  <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
-                                    +{f.add}
-                                  </span>
-                                )}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* deps subfolder */}
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => toggleFolder('src/deps')}
-                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
-                      >
-                        <ChevronDown size={11} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('src/deps') ? '' : '-rotate-90'}`} />
-                        <Folder size={12} className="text-accent/80" />
-                        <span className="font-sans">deps</span>
-                      </button>
-                      {expandedFolders.has('src/deps') && (
-                        <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
-                          {['src/deps/redis.py', 'src/deps/database.py'].map((path) => {
-                            const f = allCodebaseFiles[path]
-                            if (!f) return null
-                            const isSelected = selectedFilePath === f.path
-                            return (
-                              <button
-                                key={f.path}
-                                type="button"
-                                onClick={() => handleOpenFile(f.path)}
-                                className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                                  isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
-                                }`}
-                              >
-                                <div className="flex items-center gap-1.5 truncate">
-                                  <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
-                                  <span className="truncate">{f.name}</span>
-                                </div>
-                                {f.modified && (
-                                  <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
-                                    +{f.add}
-                                  </span>
-                                )}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
+              <div className="px-2 py-6 text-center font-sans text-[11.5px] leading-relaxed text-faint dark:text-[#8e8e93]">
+                No code changes yet. Files show up here once the agent writes code in the Code phase.
               </div>
-
-              {/* tests folder */}
-              <div>
-                <button
-                  type="button"
-                  onClick={() => toggleFolder('tests')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
-                >
-                  <ChevronDown size={12} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('tests') ? '' : '-rotate-90'}`} />
-                  <Folder size={13} className="text-accent" />
-                  <span className="font-sans font-semibold">tests</span>
-                </button>
-                {expandedFolders.has('tests') && (
-                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
-                    {['tests/test_webhook.py', 'tests/test_throttle.py', 'tests/conftest.py'].map((path) => {
-                      const f = allCodebaseFiles[path]
-                      if (!f) return null
-                      const isSelected = selectedFilePath === f.path
-                      return (
-                        <button
-                          key={f.path}
-                          type="button"
-                          onClick={() => handleOpenFile(f.path)}
-                          className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                            isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
-                          }`}
-                        >
-                          <div className="flex items-center gap-1.5 truncate">
-                            <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
-                            <span className="truncate">{f.name}</span>
-                          </div>
-                          {f.modified && (
-                            <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
-                              +{f.add}
-                            </span>
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* config folder */}
-              <div>
-                <button
-                  type="button"
-                  onClick={() => toggleFolder('config')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-ink hover:bg-black/[0.04] dark:text-[#f5f5f7] dark:hover:bg-white/[0.06]"
-                >
-                  <ChevronDown size={12} className={`text-faint transition-transform dark:text-[#8e8e93] ${expandedFolders.has('config') ? '' : '-rotate-90'}`} />
-                  <Folder size={13} className="text-accent" />
-                  <span className="font-sans font-semibold">config</span>
-                </button>
-                {expandedFolders.has('config') && (
-                  <div className="pl-3 ml-2 border-l border-black/[0.06] space-y-0.5 dark:border-white/[0.08]">
-                    {['config/settings.py'].map((path) => {
-                      const f = allCodebaseFiles[path]
-                      if (!f) return null
-                      const isSelected = selectedFilePath === f.path
-                      return (
-                        <button
-                          key={f.path}
-                          type="button"
-                          onClick={() => handleOpenFile(f.path)}
-                          className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                            isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
-                          }`}
-                        >
-                          <div className="flex items-center gap-1.5 truncate">
-                            <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
-                            <span className="truncate">{f.name}</span>
-                          </div>
-                          {f.modified && (
-                            <span className="font-mono text-[9px] font-semibold text-[#17692e] dark:text-[#34c759]">
-                              +{f.add} -{f.rem}
-                            </span>
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Root files */}
-              {['README.md', 'pyproject.toml'].map((path) => {
-                const f = allCodebaseFiles[path]
-                if (!f) return null
-                const isSelected = selectedFilePath === f.path
-                return (
-                  <button
-                    key={f.path}
-                    type="button"
-                    onClick={() => handleOpenFile(f.path)}
-                    className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left transition-colors ${
-                      isSelected ? 'bg-accent/15 dark:bg-accent/20 text-accent dark:text-[#4da3ff] font-semibold' : 'text-muted dark:text-[#a1a1aa] hover:bg-black/[0.04] hover:text-ink dark:hover:bg-white/[0.06] dark:hover:text-white'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 truncate">
-                      <File size={12} className={isSelected ? 'text-accent dark:text-[#4da3ff]' : 'text-faint dark:text-[#8e8e93]'} />
-                      <span className="truncate">{f.name}</span>
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
             )}
           </div>
         </div>
@@ -1217,9 +684,6 @@ export default function CodeReview({
                 const sign = isRem ? '-' : isAdd ? '+' : ' '
                 const signColor = isRem ? 'text-[#d70015] dark:text-[#ff453a] font-bold' : isAdd ? 'text-[#17692e] dark:text-[#34c759] font-bold' : 'text-transparent'
 
-                // Anchored floating review card on Line 42 of webhook.py (demo only)
-                const isTargetLine42 = !hasRealFiles && activeFile.path.includes('webhook.py') && lineNo === 42 && isAdd
-                const showAnchoredCard = isTargetLine42 && !anchoredCardDismissed
                 const isDraftingComment = activeCommentLine === lineNo
 
                 return (
@@ -1230,8 +694,9 @@ export default function CodeReview({
                         <button
                           type="button"
                           onClick={() => setActiveCommentLine(isDraftingComment ? null : lineNo)}
-                          title="Click to comment on this line for agent rework"
-                          className="opacity-0 group-hover:opacity-100 text-accent hover:scale-125 transition-all p-0.5 rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.1]"
+                          title="Comment on this line"
+                          aria-label={`Comment on line ${lineNo}`}
+                          className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-accent hover:scale-125 transition-all p-0.5 rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.1]"
                         >
                           <Plus size={11} strokeWidth={2.5} />
                         </button>
@@ -1248,54 +713,6 @@ export default function CodeReview({
                         {highlight(line.text)}
                       </code>
                     </div>
-
-                    {/* Anchored Review Card on Line 42 */}
-                    {showAnchoredCard && (
-                      <div className="relative my-2 ml-16 mr-8 rounded-2xl border border-black/[0.08] bg-white p-4 shadow-pop animate-rise z-20 dark:border-white/[0.12] dark:bg-[#18181b]">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-b from-[#1d1d1f] to-[#3a3a3c] dark:from-[#48484a] dark:to-[#2c2c2e] font-bold text-white text-[10px] shadow-xs">
-                              AS
-                            </span>
-                            <div>
-                              <span className="font-semibold text-ink text-[12px] dark:text-[#f5f5f7]">Reviewer ({reviewerRole})</span>
-                              <span className="ml-2 font-mono text-[10px] text-faint dark:text-[#8e8e93]">Line 42</span>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setAnchoredCardDismissed(true)}
-                            className="text-faint hover:text-ink p-1 rounded-md hover:bg-black/[0.04] dark:text-[#8e8e93] dark:hover:text-white dark:hover:bg-white/[0.08]"
-                            title="Dismiss review note"
-                          >
-                            <X size={13} />
-                          </button>
-                        </div>
-
-                        <div className="mt-2.5 text-[12.5px] font-sans leading-relaxed text-ink pl-8 dark:text-[#e4e4e7]">
-                          Rate limiter key should use hashed tenant ID instead of raw IP to prevent spoofing behind Cloudflare proxies.
-                        </div>
-
-                        <div className="mt-3.5 flex items-center justify-end gap-2 border-t border-black/[0.05] pt-2.5 dark:border-white/[0.08]">
-                          <button
-                            type="button"
-                            onClick={() => setAnchoredCardDismissed(true)}
-                            className="rounded-lg px-2.5 py-1 text-[11px] font-medium text-muted hover:bg-black/[0.04] hover:text-ink transition-colors dark:text-[#a1a1aa] dark:hover:bg-white/[0.08] dark:hover:text-white"
-                          >
-                            Resolve
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleReworkFromCard}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-accent hover:bg-accent-hover text-white px-3 py-1 text-[11.5px] font-semibold transition-all active:scale-[0.98] shadow-xs"
-                            title="Send feedback directly to the autonomous agent and run rework iteration"
-                          >
-                            <RotateCcw size={12} />
-                            <span>Submit to Agent Rework</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
 
                     {/* Custom Line Comment Drawer */}
                     {isDraftingComment && (
@@ -1333,8 +750,8 @@ export default function CodeReview({
                             onClick={() => handleSubmitCustomLineComment(lineNo)}
                             className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-[11px] font-semibold text-white shadow-xs hover:bg-accent-hover"
                           >
-                            <RotateCcw size={11} />
-                            <span>Submit for Agent Rework</span>
+                            <MessageSquare size={11} />
+                            <span>Save comment</span>
                           </button>
                         </div>
                       </div>

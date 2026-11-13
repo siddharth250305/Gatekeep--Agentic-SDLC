@@ -4,7 +4,7 @@ import { appendEvent, getChain, verifyRun, tamperEvent } from '../audit/service.
 // Wrap async handlers so rejections hit Express error handling.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
-export function auditRouter(db, broadcast = () => {}) {
+export function auditRouter(db, broadcast = () => {}, { demoMode = false } = {}) {
   const r = Router()
   const touched = (runId) => broadcast({ type: 'run.updated', runId })
 
@@ -40,6 +40,9 @@ export function auditRouter(db, broadcast = () => {}) {
       res.json(await verifyRun(db, req.params.runId))
     }),
   )
+
+  // Everything below is demo-only and is not mounted outside demo mode.
+  if (!demoMode) return r
 
   // DEMO: real DB mutation of a past event's payload (does not fix the hash).
   r.post(

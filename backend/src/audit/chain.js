@@ -18,12 +18,13 @@ export const GENESIS = '0'.repeat(64)
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize)
   if (value && typeof value === 'object') {
-    return Object.keys(value)
-      .sort()
-      .reduce((acc, k) => {
-        acc[k] = canonicalize(value[k])
-        return acc
-      }, {})
+    // fromEntries defines own properties, so no key (not even "__proto__")
+    // can turn into a prototype and drop out of the serialized bytes.
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((k) => [k, canonicalize(value[k])]),
+    )
   }
   return value
 }

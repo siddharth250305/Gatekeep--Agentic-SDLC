@@ -11,7 +11,7 @@ case "$1" in
     $DC up -d db
     printf "waiting for postgres"
     for i in $(seq 1 20); do $DC exec -T db pg_isready -U gatekeep >/dev/null 2>&1 && break; printf "."; sleep 1; done; echo
-    (cd "$ROOT/backend" && PIPELINE_URL=http://localhost:8077 nohup node src/server.js > /tmp/gk-api.log 2>&1 & disown)
+    (cd "$ROOT/backend" && PIPELINE_URL=http://localhost:8077 GATEKEEP_DEMO_MODE=1 nohup node src/server.js > /tmp/gk-api.log 2>&1 & disown)
     (cd "$ROOT/agents" && . .venv/bin/activate && CHECKPOINT_DB="$PG" GATEKEEP_API=http://localhost:4040 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
     (cd "$ROOT/agents" && . .venv/bin/activate && GATEKEEP_API=http://localhost:4040 nohup python -m app.mcp.server > /tmp/gk-mcp.log 2>&1 & disown)
     (cd "$ROOT" && nohup npm run dev > /tmp/gk-fe.log 2>&1 & disown)

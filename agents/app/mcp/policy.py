@@ -13,8 +13,9 @@ returns a PolicyResult with allowed/denied + reason.
 from __future__ import annotations
 
 import fnmatch
-import os
+import re
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -88,13 +89,36 @@ class PolicyEngine:
             f"Allowed in: {allowed_phases}",
         )
 
+    @staticmethod
+    def current_phase(run: dict[str, Any]) -> str | None:
+        """The run's active phase key, or None when no tool may touch the run.
+
+        A run that has not started yet (every step pending) begins at 'req'.
+        A finished, rejected or malformed run has no active step and returns
+        None, so callers fail closed instead of guessing a phase."""
+        steps = run.get("steps") or []
+        for step in steps:
+            if step.get("state") == "active":
+                return step.get("key")
+        if steps and all(step.get("state") == "pending" for step in steps):
+            return "req"
+        return None
+
     def check_file_access(self, path: str, write: bool = False) -> PolicyResult:
         """Check whether accessing *path* is permitted by policy."""
+        # Split on both separators so "a\..\b" style paths are caught on every platform.
+        parts = re.split(r"[\\/]+", path)
+
         # Path traversal guard
-        if ".." in path.split(os.sep):
+        if ".." in parts:
             return PolicyResult(False, "Path traversal (..) is not allowed")
 
-        filename = os.path.basename(path).lower()
+        # Git metadata: a writable .git/config can make host-side git commands
+        # run arbitrary programs, and it can hold credentials.
+        if any(part.lower() == ".git" for part in parts):
+            return PolicyResult(False, "Git metadata (.git) cannot be read or written")
+
+        filename = parts[-1].lower()
         for pattern in self.BLOCKED_FILE_PATTERNS:
             if fnmatch.fnmatch(filename, pattern):
                 action = "write to" if write else "read"

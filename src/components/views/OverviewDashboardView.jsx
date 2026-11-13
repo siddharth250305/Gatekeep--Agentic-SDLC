@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import {
-  CircleCheck, Clock, GitBranch, GitCommitHorizontal, ShieldCheck, ShieldAlert,
-  ArrowRight, Check, RotateCcw, TriangleAlert, Layers, Cpu, Box, Lock, Terminal, FileCode, Play
+  CircleCheck, GitBranch, GitCommitHorizontal, ShieldCheck, ShieldAlert, ArrowRight, Check, RotateCcw,
+  TriangleAlert, Layers, Cpu, Box, Lock, Play,
 } from 'lucide-react'
 import PipelineStepper from '../PipelineStepper'
 import McpSessionsPanel from './McpSessionsPanel'
+import { testOutcome } from './TestResultsView'
 
 export default function OverviewDashboardView({
   run,
@@ -48,15 +49,14 @@ export default function OverviewDashboardView({
     : run?.summary) || {
     headline: run?.brief || 'Workflow in progress',
     sub: run?.repo ? `Repository: ${run.repo}${run.branch ? ` (${run.branch})` : ''}` : 'Governed agent pipeline',
-    checks: run?.steps?.filter((s) => s.state === 'approved').map((s) => `${s.label} (${s.role}) approved`) || [
-      'Workflow initialized with air-gapped security controls',
-      'Deterministic cryptographic audit ledger active',
-    ],
+    checks: run?.steps?.filter((s) => s.state === 'approved').map((s) => `${s.label} (${s.role}) approved`) || [],
   }
   const totals = run?.totals || { cost: '$0.00', tokens: '0', wall: '—' }
   const tests = run?.tests || { passed: 0, failed: 0, total: 0, iterations: 0, duration: '—' }
+  const outcome = testOutcome(run?.tests)
+  // Configured sandbox profile (agents/app/sandbox.py); shown before any run is recorded.
   const sandbox = run?.sandbox || {
-    status: run?.status === 'approved' ? 'Completed' : 'Standby',
+    status: 'Not run yet',
     image: 'gatekeep-sandbox',
     network: 'Disabled',
     memory: '512 MB',
@@ -97,14 +97,16 @@ export default function OverviewDashboardView({
           <div className="flex items-center justify-between border-b border-black/[0.06] dark:border-white/[0.08] pb-3.5">
             <h3 className="text-[14px] font-semibold text-ink dark:text-white">Executive Summary</h3>
             <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-              tests.total > 0 && tests.failed === 0
+              run?.tests && outcome.tone === 'pass'
                 ? 'bg-[#34c759]/15 text-[#17692e] dark:bg-[#34c759]/20 dark:text-[#34c759]'
+                : run?.tests && outcome.tone === 'fail'
+                ? 'bg-[#ff3b30]/15 text-[#d70015] dark:bg-[#ff3b30]/20 dark:text-[#ff453a]'
                 : run?.status === 'approved'
                 ? 'bg-[#34c759]/15 text-[#17692e] dark:bg-[#34c759]/20 dark:text-[#34c759]'
                 : 'bg-black/[0.04] text-muted dark:bg-white/[0.08] dark:text-[#a1a1aa]'
             }`}>
-              {tests.total > 0
-                ? `Passed ${tests.passed}/${tests.total}`
+              {run?.tests
+                ? `Tests: ${outcome.label} (${tests.passed}/${tests.total})`
                 : run?.status === 'approved'
                 ? 'Completed'
                 : run?.awaiting
@@ -166,7 +168,7 @@ export default function OverviewDashboardView({
           <div className="flex items-center justify-between border-b border-black/[0.06] dark:border-white/[0.08] pb-3.5">
             <h3 className="text-[14px] font-semibold text-ink dark:text-white">Repository &amp; Sandbox</h3>
             <span className="rounded-full bg-accent/10 dark:bg-accent/20 px-2.5 py-0.5 text-[11px] font-semibold text-accent dark:text-[#409cff]">
-              Air-Gapped
+              No network
             </span>
           </div>
 

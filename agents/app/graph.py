@@ -20,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from .pricing import cost_usd
+from .sandbox import verdict
 from .selfheal import self_heal
 from .workspace import fetch_repo, is_git_url, read_file
 from .repository.context import build_context
@@ -496,7 +497,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 sub = "Code generated, tested in the sandbox, and ready for approval."
 
             reporter.tests(
-                state["run_id"], status="Completed", **SANDBOX_ENV,
+                state["run_id"], status=verdict(res), **SANDBOX_ENV,
                 passed=res["passed"], failed=res["failed"], total=res["total"],
                 iterations=res["iterations"], duration_ms=res["duration_ms"],
                 output=res.get("output", ""),

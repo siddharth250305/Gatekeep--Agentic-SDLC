@@ -18,7 +18,7 @@ AI coding assistants (like Claude Desktop, Cursor, or Devin) are genuinely helpf
 
 GateKeep solves this by acting as a proxy between the AI agent and your codebase. 
 
-Instead of giving the model direct access to your machine, the agent connects to GateKeep through the **Model Context Protocol (MCP)**. GateKeep forces the agent through a three-stage review pipeline, runs all tests inside an air-gapped Docker container, and records every action in a cryptographic SHA-256 HMAC audit log.
+Instead of giving the model direct access to your machine, the agent connects to GateKeep through the **Model Context Protocol (MCP)**. GateKeep forces the agent through a three-stage review pipeline, runs all tests inside a Docker container with networking disabled, and records every action in a SHA-256 hash-chained audit log.
 
 ---
 
@@ -39,7 +39,7 @@ GateKeep divides the agent's work into three structured phases, each protected b
 |   +-----------+-----------+           +-----------+-----------+         +----------+----------+ |
 |               |                                   |                                |            |
 |               v                                   v                                v            |
-|   [ GATE 1: PLANNER CHECK ]           [ GATE 2: ARCHITECT CHECK ]       [ AIR-GAPPED DOCKER   ] |
+|   [ GATE 1: PLANNER CHECK ]           [ GATE 2: ARCHITECT CHECK ]       [ NO-NETWORK DOCKER   ] |
 |   Reviewer approves or                Reviewer approves or              Isolated container    |
 |   rejects requirements                rejects file plan                 captures real exit    |
 |   before any code design              before any code edits             code (pass / fail)    |
@@ -61,12 +61,12 @@ Once Gate 1 is approved, the agent enters the design phase and calls `submit_des
 Only after Gate 2 is approved can the agent call `apply_patch` or `write_file`. All edits happen in an isolated workspace copy (`agents/workspaces/<run_id>`), never directly on your working tree.
 - When the agent calls `run_tests`, GateKeep runs pytest inside an ephemeral Docker container.
 - The container has networking disabled (`--network none`) and strict resource limits (512 MB RAM, 1 CPU).
-- GateKeep determines pass/fail strictly by checking the process exit code (`exit code 0` vs `!= 0`), so the AI cannot fake or hallucinate passing tests.
+- GateKeep decides pass/fail from the process exit code, not from the AI's summary. A run only counts as **Passed** when pytest exits with 0 and at least one test ran. Docker being down, a timeout, or zero collected tests are reported as "Sandbox unavailable", "Timed out" or "No tests ran", never as a pass.
 - Once tests pass, the human reviewer inspects the side-by-side git diff in the web dashboard, leaves line-level comments if needed, and makes the final decision.
 
 ---
 
-## Cryptographic Audit Ledger (SHA-256 HMAC)
+## Audit Ledger (SHA-256 Hash Chain)
 
 Every event in a run is recorded in a PostgreSQL database:
 - When a run is created
@@ -85,7 +85,9 @@ Event #3 (Design Submitted)   -> hash: SHA256(Event #3 + hash #2)
 Event #4 (Tampered DB Row!)   -> Hash verification fails immediately!
 ```
 
-If anyone alters past rows directly in PostgreSQL (for example, trying to cover up an unauthorized edit or spoof an approval), the chain calculation breaks immediately. The dashboard includes a live **"Simulate Tamper Test"** button that proves this live by mutating a past database record and showing the audit badge flip from green to red.
+If anyone alters a past row directly in PostgreSQL (for example, to cover up an unauthorized edit or spoof an approval) and does not recompute the hashes, verification fails at that row. In demo mode (`GATEKEEP_DEMO_MODE=1`, set by `scripts/dev.sh`) the dashboard shows a **"Simulate Tamper Test"** button that proves this by mutating a past database record and showing the audit badge flip from green to red.
+
+**Limits today:** the hashes are plain SHA-256 with no secret key, so the chain is *tamper-evident*, not tamper-proof. Someone with write access to the database can rewrite a row and recompute every later hash using the public code. Deleting the newest events is also not detected yet. A keyed HMAC and an external anchor for the latest hash are planned (see `organised.md`, items E1 and E4).
 
 ---
 
@@ -159,7 +161,7 @@ LogScrub is a CLI tool that automatically masks sensitive personal data (emails,
 
 ### Why LogScrub was a good test:
 - **It requires human judgment**: Is `1.2.3.4` an IP address to mask, or is it a software release number? The agent cannot always guess intent correctly; the human reviewer has to set the rule at Gate 1 and Gate 2.
-- **It is easy to verify**: Detectors either redact the pattern or they do not. All 131 tests were executed inside the air-gapped container and passed.
+- **It is easy to verify**: Detectors either redact the pattern or they do not. All 131 tests were executed inside the no-network sandbox container and passed.
 - **The audit log matters**: For a privacy tool, being able to verify who approved each redaction rule and when is a real requirement.
 
 ---
@@ -170,14 +172,25 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 | Test / Metric | Result | What it Means |
 | :--- | :--- | :--- |
-| **Automated Test Suite** | **68 / 68 Passed (100%)** | 42 Python tests and 26 Node tests pass cleanly with zero failures. |
-| **Sensitive File Access** | **100% Blocked** | Attempts to read or write `.env`, `*.key`, `*.pem`, and `id_rsa` are rejected across all phases. |
-| **Path Traversal Protection** | **100% Blocked** | Path traversal inputs like `../../etc/passwd` are intercepted and rejected by the policy engine. |
-| **Test Hallucination Detection** | **0% Hallucinations** | Pass and fail counts come directly from OS process exit codes, never from the LLM's own summary. |
-| **Network Isolation** | **0 Ingress / 0 Egress** | The Docker sandbox runs with `--network none`, stopping any network calls during test execution. |
-| **Audit Ledger Verification** | **100% Tamper-Evident** | Any manual change to an existing row in PostgreSQL breaks the SHA-256 HMAC chain immediately. |
+| **Automated Test Suite** | **105 Python + 38 Node passing** | Counts are collected test cases (parametrized cases count separately), including 2 real Docker sandbox tests. |
+| **Sensitive File Access** | **Blocked by name** | The MCP file tools refuse `.env`, `*.key`, `*.pem`, `id_rsa` and similar names, plus anything under `.git/`. Not yet covered: symlinks to secrets, secrets printed by test code, and some common names such as `id_ed25519` (see `drawback.md`). |
+| **Path Traversal Protection** | **Blocked** | `..` segments (with `/` or `\`) are rejected by the policy engine, and every resolved path must stay inside the run workspace. |
+| **Test Result Integrity** | **Exit code decides** | Pass/fail comes from the sandbox exit code and recorded counts, never from the LLM's own summary. The agent still writes its own tests, so a weak test can pass. |
+| **Network Isolation** | **No network** | The Docker sandbox runs with `--network none`, no Linux capabilities, a read-only code mount and capped memory, CPU, processes and `/tmp`. |
+| **Audit Ledger Verification** | **Tamper-evident** | Editing a past row without recomputing hashes is detected. See the limits in the Audit Ledger section above. |
 | **Live Telemetry Latency** | **< 100 ms** | Agent tool calls and test outputs appear on the React dashboard in real time over WebSockets. |
 | **Frontend Build Time** | **~1.1 seconds** | Vite bundles 1,900 modules cleanly with zero warnings. |
+
+---
+
+## Known Limitations
+
+GateKeep is a student project and is not production-ready yet. The main gaps, explained in simple English in [`drawback.md`](drawback.md) with a fix plan in [`organised.md`](organised.md):
+
+- **No login yet.** The backend API has no authentication, so anything that can reach it (including an agent with its own shell) can approve a gate.
+- **Gates can be bypassed through the API.** Phase state can still be changed directly, and Gate 3 is not a real phase in the state machine yet.
+- **Agents with their own tools can go around GateKeep.** Claude Code and Cursor keep their built-in Edit and Bash tools unless you restrict them.
+- **Audit log is tamper-evident, not tamper-proof** (plain SHA-256, no secret key).
 
 ---
 
@@ -259,13 +272,13 @@ gatekeeper/
 │   ├── app/
 │   │   ├── mcp/             # MCP tool definitions, session manager, policy engine
 │   │   ├── graph.py         # LangGraph workflow definition
-│   │   └── sandbox/         # Docker test runner (--network none)
+│   │   └── sandbox.py       # Docker test runner (--network none)
 │   └── tests/               # Unit and integration test suites
 ├── backend/                 # Node.js orchestration backend
 │   ├── src/
 │   │   ├── server.js        # Express server & WebSocket hub (port 4040)
 │   │   ├── db.js            # PostgreSQL connection pool & schema migration
-│   │   └── runs/            # Run routes, HMAC audit ledger, seeds
+│   │   └── runs/            # Run routes, SHA-256 audit ledger, seeds
 ├── src/                     # React 18 review dashboard
 │   ├── components/          # Pipeline stepper, diff viewer, status pills, modals
 │   ├── components/views/    # Overview, Specs & Design, Code Review, Tests, Audit
@@ -283,7 +296,7 @@ gatekeeper/
 
 1. **Keep policy checks separate from execution**: The AI model never talks directly to the operating system. Every tool request is checked against the current phase before any file is read or written.
 2. **Do not trust agent-reported test results**: Language models are prone to hallucinating passes. Running tests inside a network-isolated Docker container and checking the real process exit code is the only reliable way to know if code actually works.
-3. **Cryptographic logs keep everyone honest**: Tying every prompt, patch, and approval into a SHA-256 HMAC hash chain makes it mathematically impossible to alter past actions without being noticed.
+3. **Hash-chained logs make tampering visible**: Tying every prompt, patch, and approval into a SHA-256 hash chain means a careless edit to past events is caught. Making it tamper-proof needs a secret key (HMAC) and an anchor outside the database, which is the next step.
 
 ---
 

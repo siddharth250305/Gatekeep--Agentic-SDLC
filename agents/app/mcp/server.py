@@ -1,6 +1,6 @@
 """GateKeep MCP Server — provider-agnostic governance layer for external AI agents.
 
-Exposes 18 governed tools over MCP (SSE transport on port 8078).  Every tool
+Exposes 20 governed tools over MCP (SSE transport on 127.0.0.1:8078 by default).  Every tool
 call goes through the PolicyEngine before reaching the GateKeepTools layer.
 
 Usage:
@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -56,33 +57,32 @@ def _ensure_session(run_id: str) -> McpSession:
     return session
 
 
-def _current_phase(run: dict[str, Any]) -> str:
-    """Determine the currently active phase key from the backend run object.
-
-    The backend returns ``steps`` as ``[{key, state, status, ...}, ...]``.
-    We scan for the first step whose ``state`` is ``'active'``.
-    Falls back to ``'req'`` if no step is active (fresh run).
-    """
-    for step in run.get("steps", []):
-        if step.get("state") == "active":
-            return step.get("key", "req")
-    return "req"
-
-
 def _policy_gate(run: dict[str, Any], tool_name: str, path: str | None = None, write: bool = False) -> dict | None:
-    """Run policy checks; return an error dict if denied, else None."""
-    phase = _current_phase(run)
+    """Run policy checks; return an error dict if denied, else None.
 
-    result = policy.check_tool(phase, tool_name)
-    if not result.allowed:
-        return {"error": result.reason, "phase": phase, "tool": tool_name}
+    Every denial is written to the run's audit log."""
+    phase = policy.current_phase(run)
 
-    if path is not None:
-        result = policy.check_file_access(path, write=write)
+    if phase is None:
+        denial = {
+            "error": "This run has no active phase (it is finished or was rejected), "
+                     "so no tool can act on it.",
+            "status": run.get("status"),
+            "tool": tool_name,
+        }
+    else:
+        denial = None
+        result = policy.check_tool(phase, tool_name)
         if not result.allowed:
-            return {"error": result.reason, "path": path}
+            denial = {"error": result.reason, "phase": phase, "tool": tool_name}
+        elif path is not None:
+            result = policy.check_file_access(path, write=write)
+            if not result.allowed:
+                denial = {"error": result.reason, "path": path, "tool": tool_name}
 
-    return None
+    if denial and run.get("id"):
+        tools._audit(run["id"], "mcp.policy.denied", denial)
+    return denial
 
 
 # ── tools ────────────────────────────────────────────────────────────────
@@ -318,9 +318,17 @@ def main():
         default="sse" if sys.stdin.isatty() else "stdio",
         help="Transport protocol (stdio for Claude Desktop local, sse or streamable-http for network)",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Host address for network transports")
+    parser.add_argument(
+        "--host",
+        default=os.getenv("GATEKEEP_MCP_HOST", "127.0.0.1"),
+        help="Host address for network transports (default: this machine only)",
+    )
     parser.add_argument("--port", type=int, default=8078, help="Port for network transports")
     args = parser.parse_args()
+
+    # Logs go to stderr: in stdio mode stdout carries the JSON-RPC stream.
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="[GateKeep MCP] %(message)s")
+    log = logging.getLogger("gatekeep.mcp")
 
     # Automatically register active session on startup so dashboard indicates connection
     session_manager.auto_register_startup()
@@ -328,10 +336,10 @@ def main():
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     elif args.transport == "streamable-http":
-        print(f"[GateKeep MCP] Starting on http://{args.host}:{args.port} (Streamable HTTP)")
+        log.info("Starting on http://%s:%s (Streamable HTTP)", args.host, args.port)
         mcp.run(transport="streamable-http", host=args.host, port=args.port)
     else:
-        print(f"[GateKeep MCP] Starting on http://{args.host}:{args.port} (SSE transport)")
+        log.info("Starting on http://%s:%s (SSE transport)", args.host, args.port)
         mcp.run(transport="sse", host=args.host, port=args.port)
 
 

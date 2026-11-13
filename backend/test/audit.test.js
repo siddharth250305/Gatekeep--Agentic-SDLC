@@ -62,7 +62,7 @@ test('chains are isolated per run', async () => {
 
 test('HTTP flow: append -> verify ok -> tamper -> verify broken', async () => {
   const db = await freshDb()
-  const app = createApp(db)
+  const app = createApp(db, () => {}, { demoMode: true })
   const server = app.listen(0)
   const { port } = server.address()
   const base = `http://127.0.0.1:${port}`

@@ -38,3 +38,27 @@ def test_diff_artifacts_empty():
 
 def test_workspace_diff_without_git(tmp_path):
     assert workspace_diff(str(tmp_path)) == ""
+
+
+def test_workspace_diff_never_runs_programs_from_repo_config(tmp_path):
+    """D1: a planted fsmonitor / external diff command must not execute on the host."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "f.txt").write_text("a\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+
+    marker = tmp_path / "FIRED"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    hook.chmod(0o755)
+    _git(repo, "config", "core.fsmonitor", str(hook))
+    _git(repo, "config", "diff.external", str(hook))
+    (repo / "f.txt").write_text("b\n")
+    (repo / "new.txt").write_text("c\n")
+
+    diff = workspace_diff(str(repo))
+
+    assert not marker.exists()
+    assert "+b" in diff and "+c" in diff
