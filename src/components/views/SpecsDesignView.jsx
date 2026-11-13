@@ -4,6 +4,7 @@ import {
   FileCode, Copy, Check, HelpCircle, FileCheck, ListChecks, BookOpen, TriangleAlert,
   LayoutGrid, Braces, FilePlus2, FilePen, Clock,
 } from 'lucide-react'
+import { canDeleteComment } from '../../lib/permissions'
 
 // =========================================================================
 // MARKDOWN PARSER FOR AGENT REQUIREMENTS & DESIGN ARTIFACTS
@@ -574,7 +575,7 @@ function StatChip({ icon: Icon, value, label, tone }) {
 // MAIN SPECS & DESIGN VIEW COMPONENT
 // =========================================================================
 
-export default function SpecsDesignView({ run, reviewerRole, onAddComment, onDeleteComment }) {
+export default function SpecsDesignView({ run, reviewerRole, currentUser, onAddComment, onDeleteComment }) {
   const [activeTab, setActiveTab] = useState('requirements')
   const [commentText, setCommentText] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -844,7 +845,7 @@ export default function SpecsDesignView({ run, reviewerRole, onAddComment, onDel
                         <span className="font-semibold text-ink dark:text-[#f5f5f7]">{c.author || 'Reviewer'}</span>
                         <div className="flex items-center gap-2">
                           <span className="rounded-full bg-accent/10 px-2 py-0.5 font-mono text-[9.5px] font-medium text-accent">{c.role}</span>
-                          {onDeleteComment && (
+                          {onDeleteComment && canDeleteComment(c, currentUser) && (
                             <button type="button" onClick={() => onDeleteComment(c.id)} className="text-faint transition-colors hover:text-red dark:text-[#8e8e93]" title="Delete note">
                               <Trash size={12} />
                             </button>

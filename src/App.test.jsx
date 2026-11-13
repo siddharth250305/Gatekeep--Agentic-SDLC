@@ -27,6 +27,8 @@ function mockBackend(overrides = {}) {
     [`GET /runs/${run0427.id}`]: () => json(200, run0427),
     'GET /mcp/sessions': () => json(200, []),
     'GET /mcp/stats': () => json(200, { total_sessions: 0, active_sessions: 0, total_tool_calls: 0, sessions_by_provider: [] }),
+    'POST /auth/ws-ticket': () => json(200, { ticket: 'tkt_single_use', expiresInMs: 30000 }),
+    [`POST /runs/${run0427.id}/decide`]: () => json(200, { ...run0427, step: 'done', status: 'approved', awaiting: false }),
     ...overrides,
   }
   const fetchMock = vi.fn(async (url, init = {}) => {
@@ -108,8 +110,57 @@ test('logged in: the dashboard renders the run with the session token attached',
   expect(authed.length).toBeGreaterThan(0)
   for (const [, init] of authed) expect(init.headers.authorization).toBe(`Bearer ${SESSION.token}`)
 
-  // Live updates open one socket that carries the token.
-  await waitFor(() => expect(FakeWebSocket.instances.some((ws) => ws.url.includes(`token=${SESSION.token}`))).toBe(true))
+  // Finding #9: live updates trade the session for a single-use ticket; the
+  // session token itself never appears in the WebSocket URL.
+  await waitFor(() => expect(FakeWebSocket.instances.some((ws) => ws.url.includes('ticket=tkt_single_use'))).toBe(true))
+  for (const ws of FakeWebSocket.instances) expect(ws.url).not.toContain(SESSION.token)
+  const ticketCall = fetchMock.mock.calls.find(([url, init]) => url.endsWith('/auth/ws-ticket') && init.method === 'POST')
+  expect(ticketCall[1].headers.authorization).toBe(`Bearer ${SESSION.token}`)
+})
+
+// The JSON body of the last POST to /decide.
+function lastDecision(fetchMock) {
+  const calls = fetchMock.mock.calls.filter(([url]) => url.endsWith('/decide'))
+  return calls.length ? JSON.parse(calls.at(-1)[1].body) : null
+}
+
+test('approve tells the server which gate the reviewer was looking at (B8)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const fetchMock = mockBackend()
+  await renderApp()
+  const approve = await screen.findByTitle('Approve the current gate')
+  await waitFor(() => expect(approve).toBeEnabled())
+  fireEvent.click(approve)
+  await waitFor(() => expect(lastDecision(fetchMock)).toEqual({ decision: 'approve', feedback: '', gate: 'g3' }))
+})
+
+test('at Gate 3, Request Rework lets the reviewer send the work back to Design (B4)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const fetchMock = mockBackend()
+  await renderApp()
+  fireEvent.click(await screen.findByRole('button', { name: /Request Rework/ }))
+  // Code is the default; the reviewer picks Design.
+  expect(screen.getByRole('radio', { name: /Code/ })).toBeChecked()
+  fireEvent.click(screen.getByRole('radio', { name: /Design/ }))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'rethink the cache' } })
+  fireEvent.click(screen.getByRole('button', { name: /Send Feedback to Agent/ }))
+  await waitFor(() => expect(lastDecision(fetchMock)).toMatchObject({ decision: 'reject', gate: 'g3', target: 'design' }))
+  expect(lastDecision(fetchMock).feedback).toContain('rethink the cache')
+})
+
+test('before Gate 3 the rework window has no target choice', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const atGate2 = {
+    ...run0427, step: 'g2',
+    steps: run0427.steps.map((st) => ({ ...st, state: st.key === 'g2' ? 'active' : ['req', 'g1', 'design'].includes(st.key) ? 'approved' : 'pending' })),
+  }
+  const fetchMock = mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, atGate2) })
+  await renderApp()
+  fireEvent.click(await screen.findByRole('button', { name: /Request Rework/ }))
+  expect(screen.queryByRole('radio')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /Send Feedback to Agent/ }))
+  await waitFor(() => expect(lastDecision(fetchMock)).toMatchObject({ decision: 'reject', gate: 'g2' }))
+  expect(lastDecision(fetchMock).target).toBeUndefined()
 })
 
 test('logged in: an expired session returns to the login screen with a notice', async () => {
@@ -120,4 +171,40 @@ test('logged in: an expired session returns to the login screen with a notice', 
   expect(screen.getByRole('heading', { name: 'Sign in to GateKeep' })).toBeInTheDocument()
   expect(localStorage.getItem('gatekeep_session')).toBeNull()
   expectNoEffectErrors()
+})
+
+test('Start is offered only for a run at Requirements that was never started', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const atReq = (started) => ({
+    ...run0427, step: 'req', status: 'running', gate: null, awaiting: false, started,
+    steps: run0427.steps.map((st) => ({ ...st, state: st.key === 'req' ? 'active' : 'pending' })),
+  })
+  mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, atReq(true)) })
+  await renderApp()
+  // Sent back from Gate 1 after a pipeline start: Start would only answer 409.
+  await screen.findByText('Agent Working')
+  expect(screen.queryByRole('button', { name: /Start Pipeline/ })).toBeNull()
+})
+
+test('a run with no known step (from before the state machine) cannot be approved', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const legacy = { ...run0427, step: null }
+  mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, legacy) })
+  await renderApp()
+  const approve = await screen.findByTitle(/Nothing to approve|Approve the current gate/)
+  await screen.findAllByRole('button', { name: new RegExp(run0427.id) })
+  expect(approve).toBeDisabled()
+})
+
+test('the dashboard says SHA-256, never HMAC, until the chain really is HMAC-signed (E1)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  mockBackend()
+  await renderApp()
+  // Overview: the Audit Ledger Seal card.
+  expect(await screen.findByText('SHA-256 hash chain')).toBeInTheDocument()
+  expect(screen.queryByText(/HMAC/)).toBeNull()
+  // Audit Chain tab: the algorithm line.
+  fireEvent.click(screen.getAllByTitle('Cryptographic Audit Chain')[0])
+  expect(await screen.findByText(/Algorithm: SHA-256 hash chain/)).toBeInTheDocument()
+  expect(screen.queryByText(/HMAC/)).toBeNull()
 })

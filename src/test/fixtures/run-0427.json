@@ -164,9 +164,11 @@
   "repo": "commerce-core",
   "branch": "feat/webhook-throttle",
   "commit": "9f3c2e1",
+  "step": "g3",
   "status": "awaiting_gate",
   "gate": "Engineer",
   "awaiting": true,
+  "createdBy": "ml-priya",
   "updatedAt": "2026-11-13T17:53:13.166Z",
   "steps": [
     {
@@ -217,21 +219,32 @@
       "key": "code",
       "label": "Code & Tests",
       "role": "Agent",
-      "state": "active",
-      "status": "Ready for review",
+      "state": "approved",
+      "status": "Complete",
       "at": null,
       "num": 5,
       "cost": "$0.14",
       "tokens": "8,000"
     },
     {
-      "key": "out",
-      "label": "Output",
+      "key": "g3",
+      "label": "Gate 3",
+      "role": "Engineer",
+      "state": "active",
+      "status": "Ready for review",
+      "at": null,
+      "num": 6,
+      "cost": null,
+      "tokens": null
+    },
+    {
+      "key": "done",
+      "label": "Done",
       "role": "Branch",
       "state": "pending",
       "status": "Not started",
       "at": null,
-      "num": 6,
+      "num": 7,
       "cost": null,
       "tokens": null
     }

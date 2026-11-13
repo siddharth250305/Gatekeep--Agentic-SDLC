@@ -54,6 +54,9 @@ export const api = {
 
   logout: () => call(`/auth/logout`, { method: 'POST' }).then(json),
 
+  // Single-use, short-lived ticket for opening the live-update WebSocket.
+  wsTicket: () => call(`/auth/ws-ticket`, { method: 'POST' }).then(json),
+
   listRuns: () => call(`/runs`).then(json),
 
   createRun: (body) =>
@@ -102,13 +105,25 @@ export const api = {
 }
 
 // Live updates. Calls onMessage({ type, runId }) on each broadcast.
+// Browsers cannot send headers on a WebSocket, so each connection first asks
+// for a single-use ticket; the session token never goes in the URL.
 export function connectRealtime(onMessage) {
   let ws
   let closed = false
+  let retry
   const url = BASE.replace(/^http/, 'ws')
-  const open = () => {
-    // Browsers cannot send headers on a WebSocket, so the token goes in the URL.
-    ws = new WebSocket(`${url}/?token=${encodeURIComponent(session?.token || '')}`)
+  const reconnect = () => {
+    if (!closed) retry = setTimeout(open, 1500)
+  }
+  const open = async () => {
+    let ticket
+    try {
+      ;({ ticket } = await api.wsTicket())
+    } catch {
+      return reconnect()
+    }
+    if (closed) return
+    ws = new WebSocket(`${url}/?ticket=${encodeURIComponent(ticket)}`)
     ws.onmessage = (e) => {
       try {
         onMessage(JSON.parse(e.data))
@@ -116,13 +131,12 @@ export function connectRealtime(onMessage) {
         /* ignore malformed frames */
       }
     }
-    ws.onclose = () => {
-      if (!closed) setTimeout(open, 1500) // reconnect
-    }
+    ws.onclose = reconnect
   }
   open()
   return () => {
     closed = true
+    clearTimeout(retry)
     ws?.close()
   }
 }

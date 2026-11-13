@@ -10,7 +10,7 @@ function Node({ step }) {
       </span>
     )
   }
-  if (step.state === 'rejected') {
+  if (step.state === 'rejected' || step.state === 'cancelled') {
     return (
       <span className={`${base} bg-red text-white shadow-sm ring-2 ring-red/20`}>
         <X size={13} strokeWidth={2.5} />
