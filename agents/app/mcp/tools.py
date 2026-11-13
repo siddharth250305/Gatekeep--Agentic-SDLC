@@ -118,6 +118,23 @@ class GateKeepTools:
         resp.raise_for_status()
         return resp.json()
 
+    def _robot_action(self, run_id: str, action: str, body: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        """Ask the backend state machine to make a robot move.
+
+        Returns (True, run) when the move happened (or had already happened),
+        or (False, {"error", "step"}) when the backend refused it. The backend
+        decides; this side never writes phase state or run status (B1)."""
+        url = f"{self.base_url.rstrip('/')}/runs/{run_id}/actions/{action}"
+        resp = httpx.post(url, json=body, headers=auth_headers(), timeout=30.0)
+        if resp.status_code in (400, 403, 404, 409):
+            try:
+                refusal = resp.json()
+            except ValueError:
+                refusal = {}
+            return False, {"error": refusal.get("error") or f"refused ({resp.status_code})", "step": refusal.get("step")}
+        resp.raise_for_status()
+        return True, resp.json()
+
     def _audit(self, run_id: str, event: str, payload: dict[str, Any] | None = None,
                required: bool = False) -> None:
         """Append an audit event through the backend.
@@ -125,9 +142,9 @@ class GateKeepTools:
         With required=True a failure raises, so the caller can undo the action
         it is recording. Otherwise failures are logged and ignored."""
         try:
+            # The backend stamps the actor (this agent's token) and the time.
             self._backend_post(f"runs/{run_id}/audit", {
                 "event": event,
-                "actor": "mcp-server",
                 "payload": payload or {},
             })
         except BACKEND_ERRORS as exc:
@@ -240,28 +257,14 @@ class GateKeepTools:
         }
 
     def submit_requirements(self, session_id: str, requirements: str) -> dict[str, Any]:
-        """Submit requirements for human review, opening Gate 1."""
+        """Hand the requirements to the backend, which opens Gate 1 if the run
+        is at Requirements. They are stored only if that move is allowed."""
         session = self._get_session(session_id)
-        run_id = session.run_id
-
-        # Store the requirements artifact
-        self._backend_put(f"runs/{run_id}/artifacts", {"requirements": requirements})
-
-        # Advance phase: mark req as complete, g1 as active (awaiting review)
-        self._backend_put(f"runs/{run_id}/phases/req", {
-            "state": "approved", "status": "Complete",
-            "at": self._now_label(),
-        })
-        self._backend_put(f"runs/{run_id}/phases/g1", {
-            "state": "active", "status": "Ready for review",
-        })
-        self._backend_patch(f"runs/{run_id}", {
-            "status": "awaiting_gate", "gate": "Planner",
-        })
-
-        self._audit(run_id, "mcp.requirements.submitted", {"source": "external-agent"})
-
-        return {"submitted": True, "awaiting": "Gate 1 — Planner review"}
+        ok, body = self._robot_action(session.run_id, "submit_requirements",
+                                      {"artifacts": {"requirements": requirements}})
+        if not ok:
+            return {"submitted": False, **body}
+        return {"submitted": True, "step": body.get("step"), "awaiting": "Gate 1 — Planner review"}
 
     # ── design ───────────────────────────────────────────────────────────
 
@@ -275,28 +278,13 @@ class GateKeepTools:
         }
 
     def submit_design(self, session_id: str, design: str) -> dict[str, Any]:
-        """Submit design for human review, opening Gate 2."""
+        """Hand the design to the backend, which opens Gate 2 if the run is at
+        Design. It is stored only if that move is allowed."""
         session = self._get_session(session_id)
-        run_id = session.run_id
-
-        # Store the design artifact (as JSON for structured content)
-        self._backend_put(f"runs/{run_id}/artifacts", {"design": design})
-
-        # Advance phase: mark design as complete, g2 as active
-        self._backend_put(f"runs/{run_id}/phases/design", {
-            "state": "approved", "status": "Complete",
-            "at": self._now_label(),
-        })
-        self._backend_put(f"runs/{run_id}/phases/g2", {
-            "state": "active", "status": "Ready for review",
-        })
-        self._backend_patch(f"runs/{run_id}", {
-            "status": "awaiting_gate", "gate": "Engineer",
-        })
-
-        self._audit(run_id, "mcp.design.submitted", {"source": "external-agent"})
-
-        return {"submitted": True, "awaiting": "Gate 2 — Engineer review"}
+        ok, body = self._robot_action(session.run_id, "submit_design", {"artifacts": {"design": design}})
+        if not ok:
+            return {"submitted": False, **body}
+        return {"submitted": True, "step": body.get("step"), "awaiting": "Gate 2 — Engineer review"}
 
     # ── coding ───────────────────────────────────────────────────────────
 
@@ -374,14 +362,15 @@ class GateKeepTools:
     # ── approval ─────────────────────────────────────────────────────────
 
     def request_approval(self, session_id: str, summary: str) -> dict[str, Any]:
-        """Signal the dashboard that the external agent is ready for human review."""
+        """Ask for code review: the backend moves the run from Code to Gate 3
+        (B3) and stores the summary and the full diff with that move."""
         session = self._get_session(session_id)
         run = self.get_run(session_id)
 
         if run.get("status") == "awaiting_gate":
             return {"already_awaiting": True, "gate": run.get("gate")}
 
-        # Store the summary and the full diff so the reviewer sees the actual changes.
+        # The summary and the full diff go with the move, so the reviewer sees the actual changes.
         try:
             files, diff = diff_artifacts(workspace_diff(self._workspace_path(session)))
         except DIFF_ERRORS as exc:
@@ -402,18 +391,19 @@ class GateKeepTools:
         if diff is not None:
             artifacts["files"] = files
             artifacts["diff"] = diff
-        self._backend_put(f"runs/{session.run_id}/artifacts", artifacts)
 
-        self._audit(session.run_id, "mcp.approval.requested", {
-            "summary": summary[:500],
-            "files": [f["path"] for f in files],
+        ok, body = self._robot_action(session.run_id, "request_review", {
+            "artifacts": artifacts,
+            "details": {"summary": summary[:500], "files": [f["path"] for f in files]},
         })
-
+        if not ok:
+            return {"requested": False, **body}
         return {
             "requested": True,
-            "status": run.get("status"),
-            "gate": run.get("gate"),
-            "message": "Human reviewer has been notified via the dashboard.",
+            "step": body.get("step"),
+            "status": body.get("status"),
+            "gate": body.get("gate"),
+            "message": "Gate 3: a human Engineer has been asked to review the code on the dashboard.",
         }
 
     def get_approval_status(self, session_id: str) -> dict[str, Any]:
@@ -445,10 +435,3 @@ class GateKeepTools:
         except BACKEND_ERRORS as exc:
             log.warning("report_model warning: %s", exc)
         return {"updated": True, "model": model}
-
-    # ── private helpers ──────────────────────────────────────────────────
-
-    @staticmethod
-    def _now_label() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).strftime("%b %d, %H:%M") + " UTC"

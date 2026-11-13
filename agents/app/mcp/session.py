@@ -146,11 +146,12 @@ class SessionManager:
 
         try:
             # Audit log entry
+            # The backend stamps the actor (the agent token) and the time.
             resp = httpx.post(f"{self.base_url}/runs/{session.run_id}/audit", json={
                 "event": "mcp.session.created",
-                "actor": f"mcp-{session.provider}",
                 "payload": {
                     "session_id": session.session_id,
+                    "provider": session.provider,
                     "client": session.client,
                 },
             }, headers=auth_headers(), timeout=10.0)

@@ -67,7 +67,7 @@ def _policy_gate(run: dict[str, Any], tool_name: str, path: str | None = None, w
 
     if phase is None:
         denial = {
-            "error": "This run has no active phase (it is finished or was rejected), "
+            "error": "This run has no active phase (it is finished or cancelled), "
                      "so no tool can act on it.",
             "status": run.get("status"),
             "tool": tool_name,
@@ -276,9 +276,15 @@ def gatekeep_get_test_results(run_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 def gatekeep_request_approval(run_id: str, summary: str) -> dict[str, Any]:
-    """Request human approval for the current phase. Provide a summary of the
-    work done so the reviewer has context. The dashboard will show a notification."""
+    """Ask for code review when the code and tests are done. This moves the run
+    from Code to Gate 3, where a human Engineer approves it or sends it back to
+    Code or Design. Provide a summary of the work so the reviewer has context.
+    After this call no more code changes are possible until a reviewer decides."""
     session = _ensure_session(run_id)
+    run = tools.get_run(session.session_id)
+    deny = _policy_gate(run, "request_approval")
+    if deny:
+        return deny
     return tools.request_approval(session.session_id, summary)
 
 

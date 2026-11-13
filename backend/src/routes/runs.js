@@ -1,10 +1,34 @@
 import { Router } from 'express'
 import {
-  createRun, listRuns, getRun, updateRun, upsertPhase, upsertTests, decideGate, upsertArtifacts, upsertRepoContext, addComment, deleteComment,
+  createRun, listRuns, getRun, recordPhaseMetrics, PhaseStateError, upsertTests, decideGate, cancelRun, robotAction,
+  claimStart, releaseStart, writeStepArtifacts, upsertRepoContext, addComment, deleteComment,
 } from '../runs/service.js'
 import { actorName, requireAgent, requireAny, requireHuman } from '../auth/middleware.js'
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
+// HTTP status and message for each refusal from the state machine.
+const REFUSALS = {
+  not_found: [404, () => 'run not found'],
+  bad_decision: [400, () => 'decision must be approve or reject'],
+  bad_action: [400, () => 'unknown action'],
+  bad_details: [400, () => 'details must be a JSON object'],
+  bad_artifacts: [400, () => 'artifacts must be an object holding only what this action hands over (requirements | design | files, diff, summary)'],
+  target_required: [400, () => 'at Gate 3, reject needs a target: code or design'],
+  wrong_role: [403, (o) => `this step is assigned to ${o.gate}`],
+  requester: [403, () => 'the person who asked for this work cannot give the final approval'],
+  not_allowed: [409, (o) => `that move is not allowed while the run is at '${o.step}'`],
+  finished: [409, (o) => `the run is ${o.step === 'done' ? 'finished' : 'cancelled'} and cannot change`],
+  stale: [409, (o) => `this gate was already decided; the run is now at '${o.step}'`],
+  unknown_step: [409, () => 'the run has no known step, so nothing can move it'],
+  bad_actor: [403, () => 'forbidden'],
+  wrong_step: [409, (o) => `only the work of the current step can be written (the run is at '${o.step}')`],
+}
+
+function refuse(res, out) {
+  const [status, message] = REFUSALS[out.error] || [409, () => 'refused']
+  return res.status(status).json({ error: message(out), reason: out.error, step: out.step })
+}
 
 // Calls from the backend to the agent pipeline carry a shared secret, so only
 // the backend (after checking the reviewer's login) can resume a paused gate.
@@ -34,7 +58,9 @@ export function runsRouter(db, broadcast = () => {}) {
   }))
 
   r.post('/runs', requireHuman, wrap(async (req, res) => {
-    const run = await createRun(db, req.body || {})
+    const { runId, brief, description, repo, branch, commit } = req.body || {}
+    const { id, username } = req.principal.user
+    const run = await createRun(db, { runId, brief, description, repo, branch, commit, createdBy: { id, username } })
     touched(run.id)
     res.status(201).json(run)
   }))
@@ -45,103 +71,142 @@ export function runsRouter(db, broadcast = () => {}) {
     res.json(run)
   }))
 
-  r.patch('/runs/:runId', requireAgent, wrap(async (req, res) => {
-    const run = await updateRun(db, req.params.runId, req.body || {})
-    if (!run) return res.status(404).json({ error: 'run not found' })
-    touched(run.id)
-    res.json(run)
-  }))
+  // There is no PATCH /runs/:runId. A run's step changes only through
+  // /decide, /cancel (humans) and /actions/:action (robot), all of which go
+  // through the state machine (B1).
 
   // Kick off the LangGraph pipeline for a run (forwards to the agent service).
+  // Safe to repeat: only the first call for a run still at Requirements starts
+  // it; later calls get 409. The claim is released only when nothing listens
+  // at the pipeline address; any other failure may have happened after the
+  // graph began, so releasing it could launch a second graph for the run.
   r.post('/runs/:runId/start', requireHuman, wrap(async (req, res) => {
+    const { runId } = req.params
     const pipelineUrl = process.env.PIPELINE_URL || 'http://localhost:8077'
-    const run = await getRun(db, req.params.runId)
-    if (!run) return res.status(404).json({ error: 'run not found' })
-    const resp = await fetch(`${pipelineUrl}/pipeline/${encodeURIComponent(req.params.runId)}/start`, {
-      method: 'POST', headers: pipelineHeaders(),
-      body: JSON.stringify({ brief: run.brief, repo: run.repo, branch: run.branch }),
-    })
-    if (!resp.ok) return res.status(502).json({ error: 'pipeline start failed' })
-    touched(req.params.runId)
-    res.json(await getRun(db, req.params.runId))
+    const claim = await claimStart(db, runId)
+    if (claim.error === 'not_found') return res.status(404).json({ error: 'run not found' })
+    if (claim.error) {
+      const why = claim.error === 'started' ? 'this run was already started' : `only a run at Requirements can be started (it is at '${claim.step}')`
+      return res.status(409).json({ error: why, reason: claim.error, step: claim.step })
+    }
+    const run = await getRun(db, runId)
+    let resp
+    try {
+      resp = await fetch(`${pipelineUrl}/pipeline/${encodeURIComponent(runId)}/start`, {
+        method: 'POST', headers: pipelineHeaders(),
+        body: JSON.stringify({ brief: run.brief, repo: run.repo, branch: run.branch }),
+      })
+    } catch (err) {
+      if (connectionRefused(err)) {
+        await releaseStart(db, runId)
+        return res.status(502).json({ error: 'the agent pipeline is not running; start it and try again' })
+      }
+      resp = null
+    }
+    if (!resp?.ok) {
+      return res.status(502).json({ error: 'pipeline start failed part-way; cancel the run if it does not move' })
+    }
+    touched(runId)
+    res.json(await getRun(db, runId))
   }))
 
-  // Runs with a decision in flight. Resuming the pipeline can take minutes (the
-  // next agent phase runs before it answers), so a second Approve arriving
-  // meanwhile is refused instead of being forwarded too.
+  // Runs with a decision in flight in this process. The state machine already
+  // serializes decisions with a row lock; this also stops a second click from
+  // waiting behind a slow pipeline resume and then being forwarded too.
   const deciding = new Set()
 
-  // Human gate decision: approve / reject the run's active gate.
-  // Who decides is taken from the login, never from the request body.
-  // When PIPELINE_URL is set, forward to the agent service so the decision
-  // resumes the real LangGraph graph (the agent performs the state mutations
-  // via its reporter). Falls back to local handling only when the pipeline is
-  // not running or does not know the run, never after a failure that could
-  // have happened halfway through a resume.
-  r.post('/runs/:runId/decide', requireHuman, wrap(async (req, res) => {
-    const { runId } = req.params
-    const { decision, feedback } = req.body || {}
-    if (decision !== 'approve' && decision !== 'reject') return res.status(400).json({ error: 'decision must be approve or reject' })
+  async function oneAtATime(runId, res, fn) {
     if (deciding.has(runId)) return res.status(409).json({ error: 'a decision for this run is already in progress' })
     deciding.add(runId)
     try {
-      await decide(req, res, { decision, feedback })
+      await fn()
     } finally {
       deciding.delete(runId)
     }
-  }))
-
-  async function decide(req, res, { decision, feedback }) {
-    const { runId } = req.params
-    const actor = actorName(req.principal)
-    const { role } = req.principal.user
-
-    const pipelineUrl = process.env.PIPELINE_URL || 'http://localhost:8077'
-    if (pipelineUrl) {
-      const run = await getRun(db, runId)
-      if (!run) return res.status(404).json({ error: 'run not found' })
-      if (!run.awaiting || !run.gate) return res.status(409).json({ error: 'no active gate to decide' })
-      if (role !== 'Admin' && role !== run.gate) return res.status(403).json({ error: `gate is assigned to ${run.gate}` })
-      // The gate this decision is for. The pipeline refuses it if the run has
-      // already moved past that gate, so a late Approve cannot land on the next one.
-      const gate = run.steps.find((s) => s.state === 'active')?.key
-      let resp
-      try {
-        resp = await fetch(`${pipelineUrl}/pipeline/${encodeURIComponent(runId)}/resume`, {
-          method: 'POST', headers: pipelineHeaders(),
-          body: JSON.stringify({ decision, feedback: feedback || '', actor, gate }),
-        })
-      } catch (err) {
-        if (!connectionRefused(err)) return res.status(502).json({ error: 'pipeline resume failed' })
-        // nothing listening -> local fallback below
-      }
-      if (resp?.ok) {
-        touched(runId)
-        return res.json(await getRun(db, runId))
-      }
-      if (resp) {
-        const body = await resp.json().catch(() => ({}))
-        if (resp.status === 409 && body.reason === 'stale_gate') {
-          return res.status(409).json({ error: 'this gate was already decided' })
-        }
-        if (!(resp.status === 409 && body.reason === 'not_running')) {
-          return res.status(502).json({ error: `pipeline resume failed (${resp.status})` })
-        }
-        // the pipeline does not know this run -> local fallback below
-      }
-    }
-
-    const out = await decideGate(db, runId, { decision, actor, role, feedback })
-    if (out.error === 'not_found') return res.status(404).json({ error: 'run not found' })
-    if (out.error === 'bad_decision') return res.status(400).json({ error: 'decision must be approve or reject' })
-    if (out.error === 'wrong_role') return res.status(403).json({ error: `gate is assigned to ${out.gate}` })
-    if (out.error === 'no_active_gate') return res.status(409).json({ error: 'no active gate to decide' })
-    touched(runId)
-    res.json(out.run)
   }
 
+  // Tell the agent pipeline (if it is running this run) what the human
+  // decided, so its paused graph continues. The backend has already recorded
+  // the move, so this never changes state: a pipeline that is not running, or
+  // does not know the run (MCP mode), is fine; any other failure is reported
+  // back as a warning next to the recorded decision.
+  async function resumePipeline(runId, body) {
+    const pipelineUrl = process.env.PIPELINE_URL || 'http://localhost:8077'
+    let resp
+    try {
+      resp = await fetch(`${pipelineUrl}/pipeline/${encodeURIComponent(runId)}/resume`, {
+        method: 'POST', headers: pipelineHeaders(), body: JSON.stringify(body),
+      })
+    } catch (err) {
+      return connectionRefused(err) ? { resumed: false, reason: 'not_running' } : { resumed: false, reason: 'unreachable' }
+    }
+    if (resp.ok) return { resumed: true }
+    const out = await resp.json().catch(() => ({}))
+    if (resp.status === 409 && out.reason === 'not_running') return { resumed: false, reason: 'not_running' }
+    return { resumed: false, reason: out.reason || `status_${resp.status}` }
+  }
+
+  // Human gate decision: approve / reject the run's current gate.
+  // Body: { decision: 'approve'|'reject', target?: 'code'|'design' (Gate 3
+  // rejects), gate?: the step the reviewer was looking at, feedback? }.
+  // Who decides is taken from the login, never from the request body.
+  r.post('/runs/:runId/decide', requireHuman, wrap(async (req, res) => {
+    const { runId } = req.params
+    const { decision, target, gate, feedback } = req.body || {}
+    if (decision !== 'approve' && decision !== 'reject') return res.status(400).json({ error: 'decision must be approve or reject' })
+    if (gate !== undefined && gate !== null && typeof gate !== 'string') return res.status(400).json({ error: 'gate must be a step name' })
+    await oneAtATime(runId, res, async () => {
+      const { user } = req.principal
+      const out = await decideGate(db, runId, {
+        decision, target, feedback, user, expectedStep: typeof gate === 'string' && gate ? gate : undefined,
+      })
+      if (out.error) return refuse(res, out)
+      touched(runId)
+      const pipeline = await resumePipeline(runId, {
+        decision, target: out.to, feedback: typeof feedback === 'string' ? feedback : '', actor: actorName(req.principal), gate: out.from,
+      })
+      // Without a pipeline (MCP mode) not_running is normal. For a run the
+      // pipeline started, it means nobody will do the next step: say so.
+      const quiet = pipeline.resumed || (pipeline.reason === 'not_running' && !out.run.started)
+      res.json(quiet ? out.run : { ...out.run, pipeline })
+    })
+  }))
+
+  // Cancel a run from any active step (Planner, Engineer or Admin). Final.
+  r.post('/runs/:runId/cancel', requireHuman, wrap(async (req, res) => {
+    const { runId } = req.params
+    const { reason } = req.body || {}
+    await oneAtATime(runId, res, async () => {
+      const out = await cancelRun(db, runId, { user: req.principal.user, feedback: reason })
+      if (out.error) return refuse(res, out)
+      touched(runId)
+      await resumePipeline(runId, { decision: 'cancel', target: 'cancelled', feedback: '', actor: actorName(req.principal), gate: out.from })
+      res.json(out.run)
+    })
+  }))
+
+  // A robot finished its step and hands it over: submit_requirements,
+  // submit_design or request_review. The state machine decides whether that
+  // move is allowed from where the run is. Repeating one returns 200 unchanged.
+  r.post('/runs/:runId/actions/:action', requireAgent, wrap(async (req, res) => {
+    const { runId, action } = req.params
+    const { details, artifacts } = req.body || {}
+    const out = await robotAction(db, runId, action, { agent: req.principal.name, details, artifacts })
+    if (out.error) return refuse(res, out)
+    if (!out.unchanged) touched(runId)
+    res.json(out.run)
+  }))
+
+  // Metrics only (cost, tokens, model, duration). Phase state, status and
+  // time can only change through the state machine (B1).
   r.put('/runs/:runId/phases/:key', requireAgent, wrap(async (req, res) => {
-    const row = await upsertPhase(db, req.params.runId, req.params.key, req.body || {})
+    let row
+    try {
+      row = await recordPhaseMetrics(db, req.params.runId, req.params.key, req.body || {})
+    } catch (err) {
+      if (err instanceof PhaseStateError) return res.status(403).json({ error: err.message })
+      throw err
+    }
     if (!row) return res.status(404).json({ error: 'phase not found or no fields' })
     touched(req.params.runId)
     res.json(await getRun(db, req.params.runId))
@@ -158,7 +223,8 @@ export function runsRouter(db, broadcast = () => {}) {
   r.put('/runs/:runId/artifacts', requireAgent, wrap(async (req, res) => {
     const { comments, ...artifacts } = req.body || {}
     if (comments !== undefined) return res.status(403).json({ error: 'comments can only be written by a logged-in reviewer' })
-    await upsertArtifacts(db, req.params.runId, artifacts)
+    const out = await writeStepArtifacts(db, req.params.runId, artifacts)
+    if (out.error) return refuse(res, out)
     touched(req.params.runId)
     res.json(await getRun(db, req.params.runId))
   }))

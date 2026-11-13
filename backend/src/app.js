@@ -4,6 +4,7 @@ import { auditRouter } from './routes/audit.js'
 import { authRouter } from './routes/auth.js'
 import { mcpRouter } from './routes/mcp.js'
 import { runsRouter } from './routes/runs.js'
+import { wsTickets } from './auth/tickets.js'
 
 // Browsers may only call the API from the dashboard's own origin(s).
 // Comma-separated list, e.g. "http://localhost:5180,https://gatekeep.example".
@@ -21,6 +22,7 @@ export function allowedOrigins(value = process.env.GATEKEEP_UI_ORIGINS) {
 export function createApp(db, broadcast = () => {}, {
   demoMode = process.env.GATEKEEP_DEMO_MODE === '1',
   uiOrigins = allowedOrigins(),
+  tickets = wsTickets,
 } = {}) {
   const app = express()
   app.use(express.json())
@@ -30,7 +32,7 @@ export function createApp(db, broadcast = () => {}, {
     if (origin && uiOrigins.has(origin)) {
       res.header('Access-Control-Allow-Origin', origin)
       res.header('Vary', 'Origin')
-      res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS')
+      res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
       res.header('Access-Control-Allow-Headers', 'content-type, authorization')
     }
     if (req.method === 'OPTIONS') return res.sendStatus(204)
@@ -41,7 +43,7 @@ export function createApp(db, broadcast = () => {}, {
 
   // Who is calling (req.principal). Each route then declares who may call it.
   app.use(authenticate(db))
-  app.use('/', authRouter(db))
+  app.use('/', authRouter(db, { tickets }))
   app.use('/', runsRouter(db, broadcast))
   app.use('/', auditRouter(db, broadcast, { demoMode }))
   app.use('/', mcpRouter(db, broadcast))

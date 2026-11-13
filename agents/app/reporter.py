@@ -1,4 +1,7 @@
-"""Reports pipeline progress to the Node backend (metrics, audit, run state).
+"""Reports pipeline work to the Node backend: metrics, artifacts, test results,
+work audit events, and robot actions (submit_requirements, submit_design,
+request_review). The backend state machine owns run state, so nothing here
+writes a phase's state or a run's status (B1).
 NullReporter records calls for tests instead of making HTTP requests."""
 
 from __future__ import annotations
@@ -6,6 +9,16 @@ from __future__ import annotations
 import os
 
 from .backend_auth import auth_headers
+
+# Phase rows take metrics only; their state, status and time belong to the backend.
+STATE_FIELDS = frozenset({"state", "status", "at"})
+
+
+def _metrics_only(fields: dict) -> dict:
+    forbidden = STATE_FIELDS & set(fields)
+    if forbidden:
+        raise ValueError(f"phase {sorted(forbidden)} can only change through the backend state machine")
+    return fields
 
 
 class HttpReporter:
@@ -16,15 +29,28 @@ class HttpReporter:
         self.base = base or os.getenv("GATEKEEP_API", "http://localhost:4040")
 
     def phase(self, run_id: str, key: str, **fields):
-        self._httpx.put(f"{self.base}/runs/{run_id}/phases/{key}", json=fields, headers=auth_headers(), timeout=8)
+        """Record a phase's metrics (cost, tokens, model, duration)."""
+        self._httpx.put(f"{self.base}/runs/{run_id}/phases/{key}", json=_metrics_only(fields),
+                        headers=auth_headers(), timeout=8)
 
-    def run(self, run_id: str, **fields):
-        self._httpx.patch(f"{self.base}/runs/{run_id}", json=fields, headers=auth_headers(), timeout=8)
+    def action(self, run_id: str, action: str, artifacts: dict | None = None, details: dict | None = None):
+        """Hand a finished step to the backend, which moves the run if allowed.
+        A refusal raises, so the pipeline stops instead of carrying on."""
+        body: dict = {}
+        if artifacts:
+            body["artifacts"] = artifacts
+        if details:
+            body["details"] = details
+        resp = self._httpx.post(f"{self.base}/runs/{run_id}/actions/{action}", json=body,
+                                headers=auth_headers(), timeout=8)
+        resp.raise_for_status()
+        return resp.json()
 
-    def audit(self, run_id: str, event: str, actor: str, payload: dict | None = None):
+    def audit(self, run_id: str, event: str, payload: dict | None = None):
+        """Record work the pipeline did. The backend stamps the actor and time."""
         self._httpx.post(
             f"{self.base}/runs/{run_id}/audit",
-            json={"event": event, "actor": actor, "payload": payload or {}},
+            json={"event": event, "payload": payload or {}},
             headers=auth_headers(),
             timeout=8,
         )
@@ -50,18 +76,25 @@ class HttpReporter:
 class NullReporter:
     def __init__(self):
         self.phases: list[tuple[str, dict]] = []
-        self.runs: list[dict] = []
-        self.audits: list[tuple[str, str]] = []
+        self.runs: list[dict] = []  # stays empty: there is no run-status writer any more
+        self.actions: list[str] = []
+        self.action_bodies: list[tuple[str, dict]] = []
+        self.audits: list[tuple[str, dict]] = []
         self.tests_reported: list[dict] = []
 
     def phase(self, run_id, key, **fields):
-        self.phases.append((key, fields))
+        self.phases.append((key, _metrics_only(fields)))
 
-    def run(self, run_id, **fields):
-        self.runs.append(fields)
+    def action(self, run_id, action, artifacts=None, details=None):
+        self.actions.append(action)
+        self.action_bodies.append((action, {"artifacts": artifacts, "details": details}))
+        return {}
 
-    def audit(self, run_id, event, actor, payload=None):
-        self.audits.append((event, actor))
+    def audit(self, run_id, event, payload=None):
+        self.audits.append((event, payload or {}))
+
+    def audit_events(self) -> list[str]:
+        return [event for event, _ in self.audits]
 
     def tests(self, run_id, **fields):
         self.tests_reported.append(fields)

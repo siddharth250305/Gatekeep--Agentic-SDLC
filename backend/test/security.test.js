@@ -88,7 +88,7 @@ test('a rejected bad event over HTTP leaves the chain valid', async () => {
     const res = await fetch(`${base}/runs/RUN-7/audit`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...agent },
-      body: JSON.stringify({ event: 123, actor: 'x' }),
+      body: JSON.stringify({ event: 123 }),
     })
     assert.equal(res.status, 400)
   })
