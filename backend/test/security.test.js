@@ -2,18 +2,11 @@
 // audit field validation (E5).
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { newDb } from 'pg-mem'
-import { runSchema } from '../src/db.js'
 import { appendEvent, verifyRun } from '../src/audit/service.js'
 import { allowedOrigins, createApp } from '../src/app.js'
+import { freshDb } from './helpers/db.js'
+import { asAgent, asReviewer } from './helpers/auth.js'
 
-async function freshDb() {
-  const mem = newDb()
-  const { Pool } = mem.adapters.createPg()
-  const pool = new Pool()
-  await runSchema(pool)
-  return pool
-}
 
 async function withServer(app, fn) {
   const server = app.listen(0)
@@ -56,10 +49,11 @@ test('tamper route is not mounted outside demo mode', async () => {
   const db = await freshDb()
   await appendEvent(db, { runId: 'RUN-1', event: 'run.created', actor: 'a' })
   await appendEvent(db, { runId: 'RUN-1', event: 'g1.approved', actor: 'b' })
+  const human = await asReviewer(db)
   await withServer(createApp(db, () => {}, { demoMode: false }), async (base) => {
     const res = await fetch(`${base}/runs/RUN-1/audit/2/tamper`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...human },
       body: JSON.stringify({ payload: { x: 1 } }),
     })
     assert.equal(res.status, 404)
@@ -89,10 +83,11 @@ for (const [label, fields, message] of [
 test('a rejected bad event over HTTP leaves the chain valid', async () => {
   const db = await freshDb()
   await appendEvent(db, { runId: 'RUN-7', event: 'run.created', actor: 'a' })
+  const agent = await asAgent(db)
   await withServer(createApp(db), async (base) => {
     const res = await fetch(`${base}/runs/RUN-7/audit`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({ event: 123, actor: 'x' }),
     })
     assert.equal(res.status, 400)

@@ -10,6 +10,8 @@ Usage:
 
 from __future__ import annotations
 
+import hmac
+import json
 import logging
 import os
 import sys
@@ -304,6 +306,45 @@ def gatekeep_report_model(run_id: str, model: str) -> dict[str, Any]:
     return tools.report_model(session.session_id, model)
 
 
+# ── network auth ─────────────────────────────────────────────────────────
+
+class BearerTokenAuth:
+    """ASGI middleware: every HTTP request must carry `Authorization: Bearer <token>`.
+
+    Protects the SSE / streamable-HTTP transports, which anything that can
+    reach the port could otherwise use. stdio needs no token (no network)."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            presented = dict(scope.get("headers") or []).get(b"authorization", b"")
+            if not hmac.compare_digest(presented, self.expected):
+                body = json.dumps({"error": "missing or wrong GateKeep MCP token"}).encode()
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"www-authenticate", b"Bearer")]})
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+def build_network_app(transport: str, host: str, token: str | None):
+    """The MCP ASGI app for a network transport, wrapped in the token check.
+
+    Refuses to build without a token: an open MCP port lets anyone drive the
+    agent tools, so there is no unauthenticated network mode."""
+    if not token:
+        raise SystemExit(
+            "GATEKEEP_MCP_TOKEN is not set. Network transports require a token; "
+            "set it, or use --transport stdio for a local client."
+        )
+    inner = mcp.streamable_http_app(host=host) if transport == "streamable-http" else mcp.sse_app(host=host)
+    return BearerTokenAuth(inner, token)
+
+
 # ── entrypoint ───────────────────────────────────────────────────────────
 
 def main():
@@ -335,12 +376,13 @@ def main():
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")
-    elif args.transport == "streamable-http":
-        log.info("Starting on http://%s:%s (Streamable HTTP)", args.host, args.port)
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
-    else:
-        log.info("Starting on http://%s:%s (SSE transport)", args.host, args.port)
-        mcp.run(transport="sse", host=args.host, port=args.port)
+        return
+
+    import uvicorn
+
+    app = build_network_app(args.transport, args.host, os.getenv("GATEKEEP_MCP_TOKEN"))
+    log.info("Starting on http://%s:%s (%s, token required)", args.host, args.port, args.transport)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

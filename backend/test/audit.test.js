@@ -1,18 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { newDb } from 'pg-mem'
-import { runSchema } from '../src/db.js'
 import { appendEvent, getChain, verifyRun, tamperEvent } from '../src/audit/service.js'
 import { createApp } from '../src/app.js'
+import { freshDb } from './helpers/db.js'
+import { asAgent, asReviewer } from './helpers/auth.js'
 
-// Fresh in-memory Postgres per call.
-async function freshDb() {
-  const mem = newDb()
-  const { Pool } = mem.adapters.createPg()
-  const pool = new Pool()
-  await runSchema(pool)
-  return pool
-}
 
 test('append builds a valid per-run chain', async () => {
   const db = await freshDb()
@@ -63,6 +55,8 @@ test('chains are isolated per run', async () => {
 test('HTTP flow: append -> verify ok -> tamper -> verify broken', async () => {
   const db = await freshDb()
   const app = createApp(db, () => {}, { demoMode: true })
+  const agent = await asAgent(db)
+  const human = await asReviewer(db)
   const server = app.listen(0)
   const { port } = server.address()
   const base = `http://127.0.0.1:${port}`
@@ -74,23 +68,25 @@ test('HTTP flow: append -> verify ok -> tamper -> verify broken', async () => {
     ]) {
       const res = await fetch(`${base}/runs/RUN-9/audit`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...agent },
         body: JSON.stringify(ev),
       })
       assert.equal(res.status, 201)
     }
 
-    let v = await (await fetch(`${base}/runs/RUN-9/audit/verify`, { method: 'POST' })).json()
+    let v = await (await fetch(`${base}/runs/RUN-9/audit/verify`, { method: 'POST', headers: human })).json()
     assert.equal(v.valid, true)
 
-    const t = await fetch(`${base}/runs/RUN-9/audit/2/tamper`, {
+    const tamper = (headers) => fetch(`${base}/runs/RUN-9/audit/2/tamper`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...headers },
       body: JSON.stringify({ payload: { file: 'backdoor.py' } }),
     })
-    assert.equal(t.status, 200)
+    // The demo tamper is Admin-only, even in demo mode.
+    assert.equal((await tamper(human)).status, 403)
+    assert.equal((await tamper(await asReviewer(db, 'Admin'))).status, 200)
 
-    v = await (await fetch(`${base}/runs/RUN-9/audit/verify`, { method: 'POST' })).json()
+    v = await (await fetch(`${base}/runs/RUN-9/audit/verify`, { method: 'POST', headers: human })).json()
     assert.equal(v.valid, false)
     assert.equal(v.brokenAt, 2)
   } finally {

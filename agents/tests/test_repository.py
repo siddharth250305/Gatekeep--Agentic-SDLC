@@ -129,5 +129,46 @@ def test_workspace_tools_refuse_git_metadata(tmp_path, path):
     tools = WorkspaceTools(str(tmp_path))
     with pytest.raises(ValueError):
         tools.write_file(path, "[core]\n\tfsmonitor = /tmp/evil.sh\n")
-    with pytest.raises(ValueError):
-        tools.read_file(path)
+    assert tools.read_file(path) == "<refused: sensitive file>"
+
+
+@pytest.mark.parametrize("path", [".env", "config/prod.env", ".aws/credentials"])
+def test_workspace_tools_refuse_writing_secret_files(tmp_path, path):
+    """Covers the built-in pipeline agent too, which does not go through the MCP policy."""
+    tools = WorkspaceTools(str(tmp_path))
+    with pytest.raises(ValueError, match="sensitive"):
+        tools.write_file(path, "X=1\n")
+    with pytest.raises(ValueError, match="sensitive"):
+        tools.apply_patch(path, "X", "Y")
+    assert not (tmp_path / path).exists()
+
+
+# ── D5: one block list, with the common secret files that were missing ──
+
+@pytest.mark.parametrize("path", [
+    ".aws/credentials", "home/.ssh/config", ".ssh/id_ed25519", "id_ecdsa", ".envrc", "prod.env",
+    "infra/terraform.tfstate", "infra/terraform.tfstate.backup", "vars.tfvars", ".git-credentials",
+    ".htpasswd", "AuthKey_ABC.p8", ".kube/config", ".docker/config.json", ".PGPASS", "Prod.ENV",
+    "sub\\.aws\\credentials", ".git/config",
+])
+def test_previously_missed_secret_files_are_sensitive(path):
+    assert is_sensitive_path(path)
+
+
+@pytest.mark.parametrize("path", [
+    "src/env.py", "keys/README.md", "id_rsa.pub", "src/identity.py", ".github/workflows/ci.yml",
+    "docs/aws-setup.md", "environment.yml",
+])
+def test_normal_files_are_not_sensitive(path):
+    assert not is_sensitive_path(path)
+
+
+def test_policy_engine_uses_the_same_list():
+    from app.mcp.policy import PolicyEngine
+    from app.repository import security
+
+    assert PolicyEngine.BLOCKED_FILE_PATTERNS is security.SENSITIVE_GLOBS
+    engine = PolicyEngine()
+    for path in [".aws/credentials", "id_ed25519", "prod.env", ".ssh/known_hosts"]:
+        assert engine.check_file_access(path).allowed is False, path
+    assert engine.check_file_access("src/app.py").allowed is True

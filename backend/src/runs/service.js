@@ -3,6 +3,7 @@
 // and its verification result from the audit layer.
 
 import { appendEvent, getChain, verifyRun } from '../audit/service.js'
+import { inTransaction, withTransaction } from '../db.js'
 
 export const DEFAULT_PHASES = [
   { key: 'req', label: 'Requirements', role: 'Agent' },
@@ -27,26 +28,38 @@ async function touchRun(db, runId) {
   await db.query('UPDATE runs SET updated_at = now() WHERE run_id = $1', [runId])
 }
 
+// The run row and its six phases are written in one transaction, so a failure
+// can never leave a run without phases. Generated ids retry on collision.
 export async function createRun(db, { runId, brief, description = '', repo = '', branch = '', commit = '' } = {}) {
   if (!brief) throw new Error('brief is required')
-  let id = runId
-  if (!id) {
-    const c = await db.query('SELECT count(*)::int AS n FROM runs')
-    id = `RUN-${1000 + c.rows[0].n}`
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const id = await withTransaction(db, async (tx) => {
+        let id = runId
+        if (!id) {
+          const c = await tx.query('SELECT count(*)::int AS n FROM runs')
+          id = `RUN-${1000 + c.rows[0].n + attempt}`
+        }
+        await tx.query(
+          `INSERT INTO runs (run_id, brief, description, repo, branch, commit)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [id, brief, description, repo, branch, commit],
+        )
+        for (let i = 0; i < DEFAULT_PHASES.length; i++) {
+          const p = DEFAULT_PHASES[i]
+          await tx.query(
+            `INSERT INTO run_phases (run_id, seq, key, label, role) VALUES ($1, $2, $3, $4, $5)`,
+            [id, i + 1, p.key, p.label, p.role],
+          )
+        }
+        return id
+      })
+      return getRun(db, id)
+    } catch (err) {
+      const duplicate = err.code === '23505' || /duplicate key|already exists/i.test(err.message)
+      if (runId || !duplicate || attempt >= 4) throw err
+    }
   }
-  await db.query(
-    `INSERT INTO runs (run_id, brief, description, repo, branch, commit)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [id, brief, description, repo, branch, commit],
-  )
-  for (let i = 0; i < DEFAULT_PHASES.length; i++) {
-    const p = DEFAULT_PHASES[i]
-    await db.query(
-      `INSERT INTO run_phases (run_id, seq, key, label, role) VALUES ($1, $2, $3, $4, $5)`,
-      [id, i + 1, p.key, p.label, p.role],
-    )
-  }
-  return getRun(db, id)
 }
 
 export async function listRuns(db) {
@@ -170,6 +183,8 @@ export async function updateRun(db, runId, { status, gate, branch, commit } = {}
     vals,
   )
   if (!res.rows[0]) return null
+  // Inside a transaction the caller re-reads the run after commit.
+  if (inTransaction(db)) return { id: runId }
   return getRun(db, runId)
 }
 
@@ -208,13 +223,28 @@ const GATE_ROLES = new Set(['Planner', 'Engineer'])
 // Appends a REAL audit event and advances pipeline state. (In Layer 4 this same
 // endpoint will also resume the paused LangGraph via interrupt().)
 // Returns { run } on success or { error, ... } for the route to map to a status.
+//
+// Runs in one transaction that locks the run row (SELECT ... FOR UPDATE), so
+// two reviewers deciding at the same moment are handled one after the other:
+// the second sees the gate already decided and gets no_active_gate. The phase
+// change and its audit event commit together or not at all.
+//
+// role is the reviewer's authenticated role. 'Admin' may decide any gate.
 export async function decideGate(db, runId, { decision, actor, role, feedback } = {}) {
   if (decision !== 'approve' && decision !== 'reject') return { error: 'bad_decision' }
 
-  const runRes = await db.query('SELECT * FROM runs WHERE run_id = $1', [runId])
+  const out = await withTransaction(db, (tx) => decideGateLocked(tx, runId, { decision, actor, role, feedback }))
+  if (out.error) return out
+  return { run: await getRun(db, runId) }
+}
+
+async function decideGateLocked(db, runId, { decision, actor, role, feedback }) {
+  const runRes = await db.query('SELECT * FROM runs WHERE run_id = $1 FOR UPDATE', [runId])
   const run = runRes.rows[0]
   if (!run) return { error: 'not_found' }
-  if (run.gate && role && role !== run.gate) return { error: 'wrong_role', gate: run.gate }
+  // Only a run that is waiting for a human can be decided.
+  if (run.status !== 'awaiting_gate' || !run.gate) return { error: 'no_active_gate' }
+  if (role !== 'Admin' && role !== run.gate) return { error: 'wrong_role', gate: run.gate }
 
   const phaseRes = await db.query(
     'SELECT * FROM run_phases WHERE run_id = $1 ORDER BY seq ASC',
@@ -256,7 +286,7 @@ export async function decideGate(db, runId, { decision, actor, role, feedback } 
     await updateRun(db, runId, { status: 'rejected', gate: null })
   }
 
-  return { run: await getRun(db, runId) }
+  return { ok: true }
 }
 
 // Store the artifacts the coding agent produced (files / diff / summary / requirements / design / comments).
@@ -294,8 +324,26 @@ export async function upsertArtifacts(db, runId, { files, diff, summary, require
   await touchRun(db, runId)
 }
 
+// Comments live in one JSONB array, so add/delete lock the artifacts row to
+// stop two concurrent writers from overwriting each other's change.
 export async function addComment(db, runId, comment) {
-  const art = await db.query('SELECT comments FROM run_artifacts WHERE run_id = $1', [runId])
+  return withTransaction(db, (tx) => addCommentLocked(tx, runId, comment))
+}
+
+// A run gets its artifacts row from the agents, so the first comment can come
+// before it exists. Create it first, so there is always a row to lock (two
+// first comments would otherwise both try to insert it).
+async function lockComments(db, runId) {
+  await db.query(
+    `INSERT INTO run_artifacts (run_id, comments) VALUES ($1, $2)
+     ON CONFLICT (run_id) DO NOTHING`,
+    [runId, JSON.stringify([])],
+  )
+  return db.query('SELECT comments FROM run_artifacts WHERE run_id = $1 FOR UPDATE', [runId])
+}
+
+async function addCommentLocked(db, runId, comment) {
+  const art = await lockComments(db, runId)
   const existing = Array.isArray(art.rows[0]?.comments) ? art.rows[0].comments : []
   const newComment = {
     id: `c_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -303,6 +351,7 @@ export async function addComment(db, runId, comment) {
     line: comment.line ?? null,
     text: comment.text || '',
     author: comment.author || 'Reviewer',
+    authorId: comment.authorId ?? null,
     role: comment.role || 'Engineer',
     phase: comment.phase || 'code',
     createdAt: new Date().toISOString(),
@@ -312,12 +361,22 @@ export async function addComment(db, runId, comment) {
   return newComment
 }
 
-export async function deleteComment(db, runId, commentId) {
-  const art = await db.query('SELECT comments FROM run_artifacts WHERE run_id = $1', [runId])
+// Only the comment's author or an Admin may delete it. Comments from before
+// logins existed have no authorId, so only an Admin can remove those.
+// Returns { ok: true } or { error: 'not_found' | 'forbidden' }.
+export async function deleteComment(db, runId, commentId, { userId, isAdmin = false } = {}) {
+  return withTransaction(db, (tx) => deleteCommentLocked(tx, runId, commentId, { userId, isAdmin }))
+}
+
+async function deleteCommentLocked(db, runId, commentId, { userId, isAdmin }) {
+  const art = await db.query('SELECT comments FROM run_artifacts WHERE run_id = $1 FOR UPDATE', [runId])
   const existing = Array.isArray(art.rows[0]?.comments) ? art.rows[0].comments : []
-  const updated = existing.filter((c) => c.id !== commentId)
-  await upsertArtifacts(db, runId, { comments: updated })
-  return true
+  const target = existing.find((c) => c.id === commentId)
+  if (!target) return { error: 'not_found' }
+  const isAuthor = target.authorId != null && userId != null && Number(target.authorId) === Number(userId)
+  if (!isAuthor && !isAdmin) return { error: 'forbidden' }
+  await upsertArtifacts(db, runId, { comments: existing.filter((c) => c.id !== commentId) })
+  return { ok: true }
 }
 
 // Store the UI-safe repository context (paths/reasons/languages only).

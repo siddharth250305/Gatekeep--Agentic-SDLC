@@ -1,61 +1,104 @@
 // Thin client for the GateKeep backend (Node/Express on :4040).
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:4040'
 
+// The reviewer's login session ({ token, user, expiresAt }). Kept in
+// localStorage so a page reload stays logged in; every access is guarded
+// because storage can be unavailable (private mode, blocked site data).
+const SESSION_KEY = 'gatekeep_session'
+
+export function loadSession() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')
+    if (s?.token && (!s.expiresAt || new Date(s.expiresAt) > new Date())) return s
+  } catch { /* storage unavailable */ }
+  return null
+}
+
+let session = loadSession()
+let onUnauthorized = () => {}
+
+export function setSession(next) {
+  session = next
+  try {
+    if (next) localStorage.setItem(SESSION_KEY, JSON.stringify(next))
+    else localStorage.removeItem(SESSION_KEY)
+  } catch { /* storage unavailable */ }
+}
+
+// Called when the API answers 401 (session expired or revoked).
+export function onSessionExpired(fn) {
+  onUnauthorized = fn
+}
+
+// fetch with the session token attached.
+function call(path, { headers, ...init } = {}) {
+  const auth = session?.token ? { authorization: `Bearer ${session.token}` } : {}
+  return fetch(`${BASE}${path}`, { ...init, headers: { ...auth, ...headers } })
+}
+
 async function json(res) {
+  if (res.status === 401 && !res.url.endsWith('/auth/login')) onUnauthorized()
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText)
   return res.json()
 }
 
+const JSON_HEADERS = { 'content-type': 'application/json' }
+
 export const api = {
   base: BASE,
 
-  health: () => fetch(`${BASE}/health`).then(json),
+  health: () => call(`/health`).then(json),
 
-  listRuns: () => fetch(`${BASE}/runs`).then(json),
+  login: (username, password) =>
+    call(`/auth/login`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ username, password }) }).then(json),
+
+  logout: () => call(`/auth/logout`, { method: 'POST' }).then(json),
+
+  listRuns: () => call(`/runs`).then(json),
 
   createRun: (body) =>
-    fetch(`${BASE}/runs`, {
+    call(`/runs`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_HEADERS,
       body: JSON.stringify(body),
     }).then(json),
 
-  getRun: (id) => fetch(`${BASE}/runs/${id}`).then(json),
+  getRun: (id) => call(`/runs/${id}`).then(json),
 
   start: (id) =>
-    fetch(`${BASE}/runs/${id}/start`, { method: 'POST' }).then(json),
+    call(`/runs/${id}/start`, { method: 'POST' }).then(json),
 
   decide: (id, body) =>
-    fetch(`${BASE}/runs/${id}/decide`, {
+    call(`/runs/${id}/decide`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_HEADERS,
       body: JSON.stringify(body),
     }).then(json),
 
   // Real DB mutation of a past audit event (the honest tamper demo).
   tamper: (id, seq, payload) =>
-    fetch(`${BASE}/runs/${id}/audit/${seq}/tamper`, {
+    call(`/runs/${id}/audit/${seq}/tamper`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_HEADERS,
       body: JSON.stringify({ payload }),
     }).then(json),
 
   addComment: (id, comment) =>
-    fetch(`${BASE}/runs/${id}/comments`, {
+    call(`/runs/${id}/comments`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_HEADERS,
       body: JSON.stringify(comment),
     }).then(json),
 
   deleteComment: (id, commentId) =>
-    fetch(`${BASE}/runs/${id}/comments/${commentId}`, {
+    call(`/runs/${id}/comments/${commentId}`, {
       method: 'DELETE',
     }).then(json),
 
   // MCP External Agent Sessions
-  listMcpSessions: () => fetch(`${BASE}/mcp/sessions`).then(json),
-  getMcpSessionsForRun: (runId) => fetch(`${BASE}/mcp/sessions/run/${runId}`).then(json),
-  getMcpStats: () => fetch(`${BASE}/mcp/stats`).then(json),
+  listMcpSessions: () => call(`/mcp/sessions`).then(json),
+  getMcpSessionsForRun: (runId) => call(`/mcp/sessions/run/${runId}`).then(json),
+  getMcpStats: () => call(`/mcp/stats`).then(json),
 }
 
 // Live updates. Calls onMessage({ type, runId }) on each broadcast.
@@ -64,7 +107,8 @@ export function connectRealtime(onMessage) {
   let closed = false
   const url = BASE.replace(/^http/, 'ws')
   const open = () => {
-    ws = new WebSocket(url)
+    // Browsers cannot send headers on a WebSocket, so the token goes in the URL.
+    ws = new WebSocket(`${url}/?token=${encodeURIComponent(session?.token || '')}`)
     ws.onmessage = (e) => {
       try {
         onMessage(JSON.parse(e.data))

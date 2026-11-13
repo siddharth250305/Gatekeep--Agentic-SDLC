@@ -62,18 +62,31 @@ Add GateKeep to your `~/Library/Application Support/Claude/claude_desktop_config
       "args": ["-m", "app.mcp.server"],
       "cwd": "/Users/adeshsiddharth123/gatekeeper/agents",
       "env": {
-        "GATEKEEP_API": "http://localhost:4040"
+        "GATEKEEP_API": "http://localhost:4040",
+        "GATEKEEP_API_TOKEN": "<agent token>"
       }
     }
   }
 }
 ```
 
+The MCP server calls the GateKeep backend with an **agent token**. Create one in `backend/` with `npm run token:create -- --name claude-desktop`. Agent tokens can submit work but can never approve a gate. stdio needs no MCP token because nothing goes over the network.
+
 ### B. Cursor
-In Cursor Settings -> Features -> MCP Servers -> Add New MCP Server:
-- **Name**: `gatekeep`
-- **Type**: `SSE`
-- **URL**: `http://localhost:8078/sse`
+Network transports (SSE, streamable HTTP) require a bearer token. Start the server with `GATEKEEP_MCP_TOKEN` and `GATEKEEP_API_TOKEN` set (`scripts/dev.sh setup` creates both), then add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gatekeep": {
+      "url": "http://localhost:8078/sse",
+      "headers": { "Authorization": "Bearer <GATEKEEP_MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+Without `GATEKEEP_MCP_TOKEN` the server refuses to start in network mode.
 
 ### C. Claude Code (CLI)
 When starting Claude Code:

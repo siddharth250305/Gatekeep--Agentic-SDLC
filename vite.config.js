@@ -7,4 +7,10 @@ export default defineConfig({
     port: 5180,
     strictPort: true,
   },
+  // Dashboard tests (npm test). Only the dashboard's own src/ is collected.
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.js'],
+    include: ['src/**/*.test.{js,jsx}'],
+  },
 })

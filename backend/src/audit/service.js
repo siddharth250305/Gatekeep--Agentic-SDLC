@@ -1,5 +1,6 @@
 // Audit-chain persistence. Storage on top of the pure chain in chain.js.
 
+import { withTransaction } from '../db.js'
 import { GENESIS, computeHash, verifyChain } from './chain.js'
 
 // Map a DB row (snake_case) to the shape chain.js expects (camelCase).
@@ -15,14 +16,29 @@ function toEvent(row) {
   }
 }
 
-// Append an event to a run's chain. Reads the run's tail, links prev_hash,
-// computes the new hash, inserts.
-//
-// Concurrency: appends to the SAME run are assumed serial (the orchestrator
-// drives one run's events in order; gates are one human action at a time). For
-// multi-writer safety, wrap this in a transaction with
-// `SELECT pg_advisory_xact_lock(hashtext($run_id))`. Omitted for v1 so the same
-// code runs under pg-mem in tests.
+// Lock the run's chain head for the rest of the transaction and return it.
+// Runs that predate audit_heads get their head created from the current tail.
+async function lockHead(tx, runId) {
+  const sel = 'SELECT seq, hash FROM audit_heads WHERE run_id = $1 FOR UPDATE'
+  let head = (await tx.query(sel, [runId])).rows[0]
+  if (head) return head
+  const tail = (await tx.query(
+    'SELECT seq, hash FROM audit_events WHERE run_id = $1 ORDER BY seq DESC LIMIT 1',
+    [runId],
+  )).rows[0]
+  await tx.query(
+    'INSERT INTO audit_heads (run_id, seq, hash) VALUES ($1, $2, $3) ON CONFLICT (run_id) DO NOTHING',
+    [runId, tail ? Number(tail.seq) : 0, tail ? tail.hash : GENESIS],
+  )
+  head = (await tx.query(sel, [runId])).rows[0]
+  return head
+}
+
+// Append an event to a run's chain: lock the head, link prev_hash, compute the
+// new hash, insert, move the head. All in one transaction, so two writers on
+// the same run can never both claim the same seq or fork the chain. When
+// called with a client that is already in a transaction (e.g. decideGate), the
+// event commits or rolls back together with the state change it records.
 // Postgres stores event / actor / created_at as TEXT. Hashing a number or an
 // object and then storing its string form would break verification forever, so
 // only accept the exact types that round-trip unchanged.
@@ -59,23 +75,22 @@ export function validateEvent({ runId, event, actor, payload = {}, createdAt } =
 export async function appendEvent(db, { runId, event, actor, payload = {}, createdAt } = {}) {
   validateEvent({ runId, event, actor, payload, createdAt })
 
-  const tail = await db.query(
-    'SELECT seq, hash FROM audit_events WHERE run_id = $1 ORDER BY seq DESC LIMIT 1',
-    [runId],
-  )
-  const last = tail.rows[0]
-  const seq = last ? Number(last.seq) + 1 : 1
-  const prevHash = last ? last.hash : GENESIS
-  const createdAtIso = createdAt || new Date().toISOString()
-  const hash = computeHash({ seq, event, actor, payload, createdAt: createdAtIso, prevHash })
+  return withTransaction(db, async (tx) => {
+    const head = await lockHead(tx, runId)
+    const seq = Number(head.seq) + 1
+    const prevHash = head.hash
+    const createdAtIso = createdAt || new Date().toISOString()
+    const hash = computeHash({ seq, event, actor, payload, createdAt: createdAtIso, prevHash })
 
-  const res = await db.query(
-    `INSERT INTO audit_events (run_id, seq, event, actor, payload, created_at, prev_hash, hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING *`,
-    [runId, seq, event, actor, JSON.stringify(payload), createdAtIso, prevHash, hash],
-  )
-  return toEvent(res.rows[0])
+    const res = await tx.query(
+      `INSERT INTO audit_events (run_id, seq, event, actor, payload, created_at, prev_hash, hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [runId, seq, event, actor, JSON.stringify(payload), createdAtIso, prevHash, hash],
+    )
+    await tx.query('UPDATE audit_heads SET seq = $1, hash = $2 WHERE run_id = $3', [seq, hash, runId])
+    return toEvent(res.rows[0])
+  })
 }
 
 export async function getChain(db, runId) {

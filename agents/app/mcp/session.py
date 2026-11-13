@@ -11,17 +11,17 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 import httpx
 
-from ..workspace import validate_run_id
+from ..backend_auth import auth_headers
+from ..workspace import WORKSPACES, validate_run_id
 
 log = logging.getLogger("gatekeep.mcp")
 
-# Absolute root for workspaces so paths resolve correctly regardless of cwd.
-_WORKSPACES = Path(__file__).resolve().parent.parent.parent / "workspaces"
-
+# What a backend call can fail with: transport and HTTP status errors, or a
+# body that is not valid JSON (json.JSONDecodeError is a ValueError).
+BACKEND_ERRORS = (httpx.HTTPError, ValueError)
 
 @dataclass
 class McpSession:
@@ -56,13 +56,13 @@ class SessionManager:
 
         # Validate run_id against the backend
         try:
-            resp = httpx.get(f"{self.base_url}/runs/{run_id}", timeout=10.0)
+            resp = httpx.get(f"{self.base_url}/runs/{run_id}", headers=auth_headers(), timeout=10.0)
             resp.raise_for_status()
-        except Exception as exc:
-            raise ValueError(f"Run {run_id} not found or backend unreachable: {exc}")
+        except httpx.HTTPError as exc:
+            raise ValueError(f"Run {run_id} not found or backend unreachable: {exc}") from exc
 
         session_id = str(uuid.uuid4())
-        workspace = str(_WORKSPACES / run_id)
+        workspace = str(WORKSPACES / run_id)
 
         model = os.getenv("MCP_MODEL", "Sonnet 5.5")
 
@@ -87,28 +87,30 @@ class SessionManager:
         if session:
             session.tool_calls += 1
             try:
-                httpx.patch(
+                resp = httpx.patch(
                     f"{self.base_url}/mcp/sessions/{session_id}",
                     json={
                         "tool_calls": session.tool_calls,
                         "last_tool": tool_name,
                         "last_tool_at": datetime.now(timezone.utc).isoformat(),
                     },
+                    headers=auth_headers(),
                     timeout=5.0,
                 )
-            except Exception as exc:
+                resp.raise_for_status()
+            except BACKEND_ERRORS as exc:
                 log.warning("record_tool_call warning: %s", exc)
 
     def auto_register_startup(self) -> McpSession | None:
         """On agent startup, bind to the active/awaiting run so the UI shows connection immediately."""
         try:
-            resp = httpx.get(f"{self.base_url}/runs", timeout=5.0)
-            if resp.status_code == 200:
-                runs = resp.json()
-                if runs:
-                    target = next((r for r in runs if r.get("status") == "awaiting_gate"), runs[0])
-                    return self.create_session(target["id"])
-        except Exception as exc:
+            resp = httpx.get(f"{self.base_url}/runs", headers=auth_headers(), timeout=5.0)
+            resp.raise_for_status()
+            runs = [r for r in resp.json() if isinstance(r, dict) and r.get("id")]
+            if runs:
+                target = next((r for r in runs if r.get("status") == "awaiting_gate"), runs[0])
+                return self.create_session(target["id"])
+        except (*BACKEND_ERRORS, TypeError) as exc:  # TypeError: body was not a list
             log.warning("auto-register warning: %s", exc)
         return None
 
@@ -125,31 +127,33 @@ class SessionManager:
 
     def resolve_workspace(self, session: McpSession) -> str:
         """Resolve the absolute workspace directory for a session."""
-        return session.workspace or str(_WORKSPACES / session.run_id)
+        return session.workspace or str(WORKSPACES / session.run_id)
 
     def _register_in_backend(self, session: McpSession) -> None:
         """Register the session in the backend MCP sessions table + audit log."""
         try:
             # Register in mcp_sessions table
-            httpx.post(f"{self.base_url}/mcp/sessions", json={
+            resp = httpx.post(f"{self.base_url}/mcp/sessions", json={
                 "session_id": session.session_id,
                 "run_id": session.run_id,
                 "provider": session.provider,
                 "client": session.client,
                 "model": session.model,
-            }, timeout=10.0)
-        except Exception as exc:
+            }, headers=auth_headers(), timeout=10.0)
+            resp.raise_for_status()
+        except BACKEND_ERRORS as exc:
             log.warning("session registration warning: %s", exc)
 
         try:
             # Audit log entry
-            httpx.post(f"{self.base_url}/runs/{session.run_id}/audit", json={
+            resp = httpx.post(f"{self.base_url}/runs/{session.run_id}/audit", json={
                 "event": "mcp.session.created",
                 "actor": f"mcp-{session.provider}",
                 "payload": {
                     "session_id": session.session_id,
                     "client": session.client,
                 },
-            }, timeout=10.0)
-        except Exception as exc:
+            }, headers=auth_headers(), timeout=10.0)
+            resp.raise_for_status()
+        except BACKEND_ERRORS as exc:
             log.warning("audit registration warning: %s", exc)

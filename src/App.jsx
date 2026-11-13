@@ -3,8 +3,8 @@ import {
   ChevronDown, GitBranch, Ellipsis, Plus, X, Zap, LayoutDashboard, FileText, Code, ShieldCheck, ShieldAlert,
   Download, Copy, Check, Terminal, Sun, Moon,
 } from 'lucide-react'
-import { REVIEWER } from './data/runs'
-import { api, connectRealtime } from './api'
+import { api, connectRealtime, loadSession, onSessionExpired, setSession } from './api'
+import LoginScreen from './components/LoginScreen'
 import CodeReview from './components/CodeReview'
 import OverviewDashboardView from './components/views/OverviewDashboardView'
 import SpecsDesignView from './components/views/SpecsDesignView'
@@ -104,8 +104,12 @@ export default function App() {
   })
   const [runMenu, setRunMenu] = useState(false)
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
-  const [reviewerRole, setReviewerRole] = useState('Engineer')
-  const [roleMenuOpen, setRoleMenuOpen] = useState(false)
+  // Logged-in reviewer. Their role decides which gates they may approve; the
+  // server checks it again on every decision.
+  const [session, setSessionState] = useState(() => loadSession())
+  const [loginNotice, setLoginNotice] = useState(null)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const reviewerRole = session?.user?.role
   const [newRun, setNewRun] = useState(null)
   const [reworkModalOpen, setReworkModalOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -204,21 +208,52 @@ export default function App() {
     }
   }, [])
 
+  const signOut = useCallback((notice = null) => {
+    setSession(null)
+    setSessionState(null)
+    setLoginNotice(notice)
+    setRuns([])
+    setSelectedId(null)
+  }, [])
+
   useEffect(() => {
+    onSessionExpired(() => signOut('Your session expired. Please sign in again.'))
+  }, [signOut])
+
+  const handleLoggedIn = (next) => {
+    setSession(next)
+    setSessionState(next)
+    setLoginNotice(null)
+    setLoading(true)
+  }
+
+  const handleSignOut = async () => {
+    setUserMenuOpen(false)
+    await api.logout().catch(() => {})
+    signOut()
+  }
+
+  useEffect(() => {
+    api.health().then((h) => setDemoMode(h.demoMode === true)).catch(() => setDemoMode(false))
+    if (!session) { setLoading(false); return }
     refresh()
       .catch((e) => setErr(e.message))
       .finally(() => setLoading(false))
-    api.health().then((h) => setDemoMode(h.demoMode === true)).catch(() => setDemoMode(false))
-  }, [refresh])
+  }, [refresh, session])
 
-  useEffect(() => connectRealtime((msg) => {
-    const t = msg?.type
-    if (t === 'repo.context.scanning') { flash('Scanning repository context...', 2500) }
-    else if (t === 'repo.context.generated') { flash(`Repository context ready - ${msg.files ?? 0} relevant files`, 3000) }
-    else if (t === 'mcp.session.created') { flash(`External agent connected (${msg.sessionId?.slice(0, 8)}…)`, 3000) }
-    else if (t === 'mcp.session.ended') { flash('External agent session ended', 2000) }
-    refresh().catch(() => {})
-  }), [refresh])
+  // An effect must return a cleanup function or undefined (never null), so the
+  // logged-out case returns nothing explicitly.
+  useEffect(() => {
+    if (!session) return undefined
+    return connectRealtime((msg) => {
+      const t = msg?.type
+      if (t === 'repo.context.scanning') { flash('Scanning repository context...', 2500) }
+      else if (t === 'repo.context.generated') { flash(`Repository context ready - ${msg.files ?? 0} relevant files`, 3000) }
+      else if (t === 'mcp.session.created') { flash(`External agent connected (${msg.sessionId?.slice(0, 8)}…)`, 3000) }
+      else if (t === 'mcp.session.ended') { flash('External agent session ended', 2000) }
+      refresh().catch(() => {})
+    })
+  }, [refresh, session])
 
   const run = useMemo(() => runs.find((r) => r.id === selectedId) ?? runs[0], [runs, selectedId])
   const canAct = run?.awaiting
@@ -244,7 +279,8 @@ export default function App() {
       return
     }
     try {
-      await api.decide(run.id, { decision, role: reviewerRole, actor: REVIEWER.name, feedback })
+      // Who decides comes from the login on the server, not from this request.
+      await api.decide(run.id, { decision, feedback })
       flash(decision === 'approve'
         ? `${run.id} approved. Gate advanced.`
         : `${run.id}: rework requested. Feedback sent to agent.`)
@@ -257,10 +293,7 @@ export default function App() {
 
   const handleAddComment = async (comment) => {
     try {
-      await api.addComment(run.id, {
-        ...comment,
-        author: REVIEWER.name,
-      })
+      await api.addComment(run.id, comment)
       flash('Review comment recorded')
       await refresh()
     } catch (e) {
@@ -375,6 +408,10 @@ export default function App() {
     setRunTab('code')
   }
 
+  if (!session) {
+    return <LoginScreen onLoggedIn={handleLoggedIn} notice={loginNotice} />
+  }
+
   if (loading) {
     return (
       <div className="flex h-[100dvh] items-center justify-center bg-canvas text-[13px] text-muted font-sans">
@@ -472,41 +509,36 @@ export default function App() {
 
         {/* ZONE 3 (Right): Reviewer Role Popover + New Run + Primary Action */}
         <div className="flex items-center justify-end gap-1.5 sm:gap-2 min-w-0 shrink-0">
-          {/* Acting as (Role Switcher Popover) */}
+          {/* Signed-in reviewer (role comes from the login) */}
           <div className="relative shrink-0">
             <button
               type="button"
-              onClick={() => setRoleMenuOpen((v) => !v)}
+              onClick={() => setUserMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
               className="flex h-8 items-center gap-1.5 rounded-xl border border-black/[0.08] dark:border-white/[0.12] bg-black/[0.03] dark:bg-white/[0.06] hover:bg-black/[0.06] dark:hover:bg-white/[0.1] px-2 sm:px-2.5 text-[12px] font-medium text-ink dark:text-[#f5f5f7] transition-colors cursor-pointer"
-              title={`Reviewer role: ${reviewerRole} (click to switch)`}
+              title={`Signed in as ${session.user.name} (${reviewerRole})`}
             >
-              <span className="text-[11px] text-faint dark:text-[#a1a1aa] hidden lg:inline xl:hidden 2xl:inline">Reviewer Role:</span>
+              <span className="hidden lg:inline max-w-[120px] truncate">{session.user.name}</span>
               <span className="font-semibold text-[#1d1d1f] dark:text-[#f5f5f7]">{reviewerRole}</span>
               <ChevronDown size={11} className="text-faint dark:text-[#a1a1aa] hidden sm:block" />
             </button>
-            {roleMenuOpen && (
+            {userMenuOpen && (
               <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setRoleMenuOpen(false)}
-                />
-                <div className="absolute right-0 top-full z-50 mt-1.5 w-48 rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white/95 dark:bg-[#18181b]/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise">
-                  <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint dark:text-[#a1a1aa]">
-                    Active Reviewer Identity
+                <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+                <div role="menu" className="absolute right-0 top-full z-50 mt-1.5 w-56 rounded-2xl border border-black/[0.08] dark:border-white/[0.12] bg-white/95 dark:bg-[#18181b]/95 p-1.5 shadow-pop backdrop-blur-xl animate-rise">
+                  <div className="px-2.5 py-1.5 text-[12px] text-ink dark:text-[#f5f5f7]">
+                    <div className="font-semibold truncate">{session.user.name}</div>
+                    <div className="text-[11px] text-faint dark:text-[#a1a1aa]">@{session.user.username} · {reviewerRole}</div>
                   </div>
-                  {['Engineer', 'Planner', 'Requester'].map((role) => (
-                    <button
-                      key={role}
-                      type="button"
-                      onClick={() => { setReviewerRole(role); setRoleMenuOpen(false) }}
-                      className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer ${
-                        reviewerRole === role ? 'font-semibold text-accent dark:text-[#4da3ff]' : 'text-ink dark:text-[#f5f5f7]'
-                      }`}
-                    >
-                      <span>{role}</span>
-                      {reviewerRole === role && <Check size={12} strokeWidth={2.5} />}
-                    </button>
-                  ))}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={handleSignOut}
+                    className="flex w-full items-center rounded-lg px-2.5 py-1.5 text-left text-[12px] text-ink dark:text-[#f5f5f7] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer"
+                  >
+                    Sign out
+                  </button>
                 </div>
               </>
             )}

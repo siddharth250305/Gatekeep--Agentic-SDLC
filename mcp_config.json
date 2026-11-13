@@ -10,7 +10,8 @@
       "cwd": "/Users/adeshsiddharth123/gatekeeper/agents",
       "env": {
         "PYTHONPATH": "/Users/adeshsiddharth123/gatekeeper/agents",
-        "GATEKEEP_API": "http://localhost:4040"
+        "GATEKEEP_API": "http://localhost:4040",
+        "GATEKEEP_API_TOKEN": "<agent token from: npm run token:create -- --name claude-desktop>"
       }
     }
   }

@@ -1,19 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { newDb } from 'pg-mem'
-import { runSchema } from '../src/db.js'
 import { createRun, getRun, listRuns, updateRun, upsertPhase, upsertTests, upsertArtifacts } from '../src/runs/service.js'
 import { appendEvent, tamperEvent } from '../src/audit/service.js'
 import { seed } from '../src/runs/seed.js'
 import { createApp } from '../src/app.js'
+import { freshDb } from './helpers/db.js'
+import { asAgent, asReviewer } from './helpers/auth.js'
 
-async function freshDb() {
-  const mem = newDb()
-  const { Pool } = mem.adapters.createPg()
-  const pool = new Pool()
-  await runSchema(pool)
-  return pool
-}
 
 test('createRun seeds the 6-phase pipeline', async () => {
   const db = await freshDb()
@@ -106,26 +99,28 @@ test('seed loads 3 demo runs; RUN-0427 is awaiting with real chain', async () =>
 test('HTTP: create -> get -> patch, and 404 on missing', async () => {
   const db = await freshDb()
   const app = createApp(db)
+  const human = await asReviewer(db)
+  const agent = await asAgent(db)
   const server = app.listen(0)
   const { port } = server.address()
   const base = `http://127.0.0.1:${port}`
   try {
     const created = await (await fetch(`${base}/runs`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: { 'content-type': 'application/json', ...human },
       body: JSON.stringify({ runId: 'RUN-H', brief: 'http run' }),
     })).json()
     assert.equal(created.id, 'RUN-H')
 
-    const got = await (await fetch(`${base}/runs/RUN-H`)).json()
+    const got = await (await fetch(`${base}/runs/RUN-H`, { headers: human })).json()
     assert.equal(got.brief, 'http run')
 
     const patched = await (await fetch(`${base}/runs/RUN-H`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      method: 'PATCH', headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({ status: 'approved' }),
     })).json()
     assert.equal(patched.status, 'approved')
 
-    const missing = await fetch(`${base}/runs/RUN-NOPE`)
+    const missing = await fetch(`${base}/runs/RUN-NOPE`, { headers: human })
     assert.equal(missing.status, 404)
   } finally {
     server.close()

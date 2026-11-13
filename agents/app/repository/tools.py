@@ -53,8 +53,15 @@ class WorkspaceTools:
                         return out
         return out
 
+    def _safe_writable(self, path: str) -> Path:
+        # The MCP policy engine checks this too; checking here as well covers
+        # every caller, including the built-in pipeline agent.
+        if is_sensitive_path(path):
+            raise ValueError(f"refused: {path} is a sensitive file")
+        return self._safe(path)
+
     def write_file(self, path: str, content: str) -> dict:
-        p = self._safe(path)
+        p = self._safe_writable(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
         return {"path": path, "bytes": len(content.encode())}
@@ -62,7 +69,7 @@ class WorkspaceTools:
     def apply_patch(self, path: str, find: str, replace: str) -> dict:
         """Deterministic in-place edit: replace `find` with `replace`. Safer than
         rewriting whole files. Returns applied=False if `find` is absent."""
-        p = self._safe(path)
+        p = self._safe_writable(path)
         if not p.is_file():
             return {"path": path, "applied": False, "reason": "file not found"}
         text = p.read_text(errors="replace")

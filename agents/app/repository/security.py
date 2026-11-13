@@ -13,14 +13,28 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from pathlib import PurePosixPath
 
-# Files whose contents are never read or sent to the LLM.
+# THE single list of sensitive files. Everything that decides whether a path
+# may be read, written, listed, searched or diffed uses is_sensitive_path()
+# below (including the MCP PolicyEngine), so there is nothing to keep in sync.
+
+# File names (matched case-insensitively against the last path part).
 SENSITIVE_GLOBS = [
-    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
-    "credentials.*", "secrets.*", "secret.*", "id_rsa", "id_dsa",
-    "*.keystore", "*.jks", ".npmrc", ".pypirc", ".netrc",
+    # environment files
+    ".env", ".env.*", "*.env", ".envrc",
+    # keys and certificates
+    "*.pem", "*.key", "*.p12", "*.pfx", "*.p8", "*.ppk", "*.keystore", "*.jks",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    # credential stores
+    "credentials", "credentials.*", "secrets.*", "secret.*",
+    ".npmrc", ".pypirc", ".netrc", ".pgpass", ".git-credentials", ".htpasswd", "*.kdbx",
+    # infrastructure state, which embeds secrets
+    "*.tfstate", "*.tfstate.*", "*.tfvars",
 ]
+
+# Directories whose whole contents are off limits (any path part, any depth).
+SENSITIVE_DIRS = {".git", ".ssh", ".aws", ".gnupg", ".kube", ".azure", ".docker"}
+
 
 # (category, compiled pattern). Order matters only for readability.
 SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -39,8 +53,16 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 
 
 def is_sensitive_path(path: str) -> bool:
-    name = PurePosixPath(path).name.lower()
-    return any(fnmatch.fnmatch(name, pat) for pat in SENSITIVE_GLOBS)
+    """True if *path* names a secret file or lies inside a secret directory.
+
+    Both "/" and "\\" count as separators, so Windows-style paths are checked
+    the same way on every platform."""
+    parts = [p.lower() for p in re.split(r"[\\/]+", str(path)) if p]
+    if not parts:
+        return False
+    if any(p in SENSITIVE_DIRS for p in parts):
+        return True
+    return any(fnmatch.fnmatch(parts[-1], pat) for pat in SENSITIVE_GLOBS)
 
 
 def scan_secrets(text: str) -> list[str]:
