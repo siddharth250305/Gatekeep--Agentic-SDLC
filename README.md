@@ -172,7 +172,7 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 | Test / Metric | Result | What it Means |
 | :--- | :--- | :--- |
-| **Automated Test Suite** | **105 Python + 38 Node passing** | Counts are collected test cases (parametrized cases count separately), including 2 real Docker sandbox tests. |
+| **Automated Test Suite** | **146 Python + 62 Node passing** | Counts are collected test cases (parametrized cases count separately). Includes 2 real Docker sandbox tests and 4 locking/rollback tests that run against a real Postgres (`npm run test:pg`, and in CI). |
 | **Sensitive File Access** | **Blocked by name** | The MCP file tools refuse `.env`, `*.key`, `*.pem`, `id_rsa` and similar names, plus anything under `.git/`. Not yet covered: symlinks to secrets, secrets printed by test code, and some common names such as `id_ed25519` (see `drawback.md`). |
 | **Path Traversal Protection** | **Blocked** | `..` segments (with `/` or `\`) are rejected by the policy engine, and every resolved path must stay inside the run workspace. |
 | **Test Result Integrity** | **Exit code decides** | Pass/fail comes from the sandbox exit code and recorded counts, never from the LLM's own summary. The agent still writes its own tests, so a weak test can pass. |
@@ -187,8 +187,7 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 GateKeep is a student project and is not production-ready yet. The main gaps, explained in simple English in [`drawback.md`](drawback.md) with a fix plan in [`organised.md`](organised.md):
 
-- **No login yet.** The backend API has no authentication, so anything that can reach it (including an agent with its own shell) can approve a gate.
-- **Gates can be bypassed through the API.** Phase state can still be changed directly, and Gate 3 is not a real phase in the state machine yet.
+- **Agent tokens can still change phase state directly.** Only logged-in reviewers can approve a gate, but the agent-side routes (`PUT /runs/:id/phases/:key`, `PATCH /runs/:id`) still accept raw state changes from an agent token, and Gate 3 is not a real phase in the state machine yet. Both are fixed in Milestone 2.
 - **Agents with their own tools can go around GateKeep.** Claude Code and Cursor keep their built-in Edit and Bash tools unless you restrict them.
 - **Audit log is tamper-evident, not tamper-proof** (plain SHA-256, no secret key).
 
@@ -216,8 +215,20 @@ docker compose -f backend/docker-compose.yml up -d db
 cd backend
 npm install
 npm run seed     # seeds sample runs (RUN-0427, RUN-0426, RUN-0425)
+
+# Create your reviewer account (asks for a password, min 10 characters).
+# Roles: Planner (Gate 1), Engineer (Gate 2 and 3), Admin (any gate).
+npm run user:create -- --username adesh --name "Adesh" --role Admin
+
+# Create a token for the agent services. It can submit work, never approve.
+npm run token:create -- --name agents      # prints gka_... once
+
+# A shared secret so only the backend can resume the agent pipeline
+export GATEKEEP_PIPELINE_SECRET=$(openssl rand -hex 32)
 npm start        # starts API and WebSocket server on http://localhost:4040
 ```
+
+**Shortcut:** `scripts/dev.sh setup` creates the agent token, pipeline secret, MCP token and your account in one go, and `scripts/dev.sh start` runs everything with them.
 
 ### 2. Start the Python Agent Service
 
@@ -228,8 +239,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Start the agent service on port 8077
-GATEKEEP_API=http://localhost:4040 uvicorn app.main:app --port 8077
+# Start the agent service on port 8077 (same pipeline secret as the backend)
+export GATEKEEP_API=http://localhost:4040
+export GATEKEEP_API_TOKEN=gka_...            # from npm run token:create
+export GATEKEEP_PIPELINE_SECRET=...          # same value as the backend
+uvicorn app.main:app --port 8077
 ```
 
 ### 3. Start the Frontend Dashboard
@@ -240,7 +254,7 @@ npm install
 npm run dev      # starts dashboard on http://localhost:5180
 ```
 
-Open `http://localhost:5180` in your browser. You can click between runs, review diffs, test the dark/light mode toggle, approve gates, or simulate a tamper test.
+Open `http://localhost:5180` and sign in with the account you created. You can click between runs, review diffs, and approve the gates your role allows. Every decision is recorded under your username in the audit log.
 
 ### 4. Connect Claude Desktop or Cursor over MCP
 
@@ -255,12 +269,15 @@ To let Claude Desktop use GateKeep's tools, add this to your `claude_desktop_con
       "cwd": "/absolute/path/to/gatekeeper/agents",
       "env": {
         "PYTHONPATH": "/absolute/path/to/gatekeeper/agents",
-        "GATEKEEP_API": "http://localhost:4040"
+        "GATEKEEP_API": "http://localhost:4040",
+        "GATEKEEP_API_TOKEN": "gka_..."
       }
     }
   }
 }
 ```
+
+For Cursor (SSE), the MCP server needs `GATEKEEP_MCP_TOKEN` and the client must send it as a bearer token. See [`docs/MCP_GUIDE.md`](docs/MCP_GUIDE.md).
 
 ---
 

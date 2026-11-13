@@ -511,14 +511,14 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [x] C4 Container timeout kill
 
 **Milestone 1: Foundations**
-- [ ] G4 Decision record
-- [ ] T0 Real Postgres tests
-- [ ] E6 Transactions
-- [ ] A1 Login and robot token
-- [ ] D7 MCP token
-- [ ] A4 WebSocket auth
-- [ ] D5 One block list
-- [ ] G3 Remove duplicates
+- [x] G4 Decision record
+- [x] T0 Real Postgres tests
+- [x] E6 Transactions
+- [x] A1 Login and robot token
+- [x] D7 MCP token
+- [x] A4 WebSocket auth
+- [x] D5 One block list
+- [x] G3 Remove duplicates
 
 **Milestone 2: Real checkpoints**
 - [ ] B2 State machine
@@ -527,9 +527,9 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [ ] B4 Rework loop
 - [ ] B1 Close back doors
 - [ ] B8 Safe to repeat
-- [ ] A2 Identity from login
+- [x] A2 Identity from login (done early with A1: decisions and comments use the login)
 - [ ] E2 Server-only diary writes
-- [ ] F9 Remove role dropdown
+- [x] F9 Remove role dropdown (done early with A1)
 
 **Milestone 3: Trustworthy evidence**
 - [ ] C2 JUnit results
