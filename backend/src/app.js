@@ -1,5 +1,7 @@
 import express from 'express'
+import { authenticate } from './auth/middleware.js'
 import { auditRouter } from './routes/audit.js'
+import { authRouter } from './routes/auth.js'
 import { mcpRouter } from './routes/mcp.js'
 import { runsRouter } from './routes/runs.js'
 
@@ -29,13 +31,17 @@ export function createApp(db, broadcast = () => {}, {
       res.header('Access-Control-Allow-Origin', origin)
       res.header('Vary', 'Origin')
       res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS')
-      res.header('Access-Control-Allow-Headers', 'content-type')
+      res.header('Access-Control-Allow-Headers', 'content-type, authorization')
     }
     if (req.method === 'OPTIONS') return res.sendStatus(204)
     next()
   })
 
   app.get('/health', (_req, res) => res.json({ ok: true, demoMode }))
+
+  // Who is calling (req.principal). Each route then declares who may call it.
+  app.use(authenticate(db))
+  app.use('/', authRouter(db))
   app.use('/', runsRouter(db, broadcast))
   app.use('/', auditRouter(db, broadcast, { demoMode }))
   app.use('/', mcpRouter(db, broadcast))

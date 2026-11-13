@@ -1,17 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { newDb } from 'pg-mem'
-import { runSchema } from '../src/db.js'
 import { createRun } from '../src/runs/service.js'
 import { createApp } from '../src/app.js'
+import { freshDb } from './helpers/db.js'
+import { asAgent } from './helpers/auth.js'
 
-async function freshDb() {
-  const mem = newDb()
-  const { Pool } = mem.adapters.createPg()
-  const pool = new Pool()
-  await runSchema(pool)
-  return pool
-}
 
 test('MCP HTTP flow: create session -> get session -> patch session -> end session -> stats', async () => {
   const db = await freshDb()
@@ -20,6 +13,7 @@ test('MCP HTTP flow: create session -> get session -> patch session -> end sessi
   let broadcasts = []
   const broadcast = (msg) => broadcasts.push(msg)
   const app = createApp(db, broadcast)
+  const agent = await asAgent(db)
   const server = app.listen(0)
   const { port } = server.address()
   const base = `http://127.0.0.1:${port}`
@@ -28,7 +22,7 @@ test('MCP HTTP flow: create session -> get session -> patch session -> end sessi
     // 1. Create session
     const res = await fetch(`${base}/mcp/sessions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({
         session_id: 'mcp-sess-1',
         run_id: 'RUN-MCP-1',
@@ -47,18 +41,18 @@ test('MCP HTTP flow: create session -> get session -> patch session -> end sessi
     assert.equal(broadcasts[0].type, 'mcp.session.created')
 
     // 2. Get session by ID
-    const got = await (await fetch(`${base}/mcp/sessions/mcp-sess-1`)).json()
+    const got = await (await fetch(`${base}/mcp/sessions/mcp-sess-1`, { headers: agent })).json()
     assert.equal(got.session_id, 'mcp-sess-1')
 
     // 3. Get sessions for run
-    const byRun = await (await fetch(`${base}/mcp/sessions/run/RUN-MCP-1`)).json()
+    const byRun = await (await fetch(`${base}/mcp/sessions/run/RUN-MCP-1`, { headers: agent })).json()
     assert.equal(byRun.length, 1)
     assert.equal(byRun[0].session_id, 'mcp-sess-1')
 
     // 4. Patch session with tool calls
     const patched = await (await fetch(`${base}/mcp/sessions/mcp-sess-1`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({
         tool_calls: 5,
         last_tool: 'apply_patch',
@@ -68,7 +62,7 @@ test('MCP HTTP flow: create session -> get session -> patch session -> end sessi
     assert.equal(patched.last_tool, 'apply_patch')
 
     // 5. Query stats
-    const stats = await (await fetch(`${base}/mcp/stats`)).json()
+    const stats = await (await fetch(`${base}/mcp/stats`, { headers: agent })).json()
     assert.equal(stats.total_sessions, 1)
     assert.equal(stats.active_sessions, 1)
     assert.equal(stats.total_tool_calls, 5)
@@ -77,20 +71,20 @@ test('MCP HTTP flow: create session -> get session -> patch session -> end sessi
 
     // 6. End session
     const ended = await (await fetch(`${base}/mcp/sessions/mcp-sess-1/end`, {
-      method: 'POST',
+      method: 'POST', headers: agent,
     })).json()
     assert.equal(ended.status, 'ended')
     assert.ok(ended.ended_at)
     assert.ok(broadcasts.some((b) => b.type === 'mcp.session.ended'))
 
     // 7. Verify active sessions list is empty now
-    const activeList = await (await fetch(`${base}/mcp/sessions`)).json()
+    const activeList = await (await fetch(`${base}/mcp/sessions`, { headers: agent })).json()
     assert.equal(activeList.length, 0)
 
     // 8. Error cases: 404 on missing run when creating session
     const missingRun = await fetch(`${base}/mcp/sessions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({ session_id: 'bad', run_id: 'RUN-DOES-NOT-EXIST' }),
     })
     assert.equal(missingRun.status, 404)
@@ -98,7 +92,7 @@ test('MCP HTTP flow: create session -> get session -> patch session -> end sessi
     // 9. Error case: 400 on missing fields
     const badBody = await fetch(`${base}/mcp/sessions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...agent },
       body: JSON.stringify({}),
     })
     assert.equal(badBody.status, 400)

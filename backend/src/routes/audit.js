@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { appendEvent, getChain, verifyRun, tamperEvent } from '../audit/service.js'
+import { requireAdmin, requireAgent, requireAny } from '../auth/middleware.js'
 
 // Wrap async handlers so rejections hit Express error handling.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
@@ -11,6 +12,7 @@ export function auditRouter(db, broadcast = () => {}, { demoMode = false } = {})
   // Append an event to a run's audit chain.
   r.post(
     '/runs/:runId/audit',
+    requireAgent,
     wrap(async (req, res) => {
       const { event, actor, payload, createdAt } = req.body || {}
       const row = await appendEvent(db, {
@@ -28,6 +30,7 @@ export function auditRouter(db, broadcast = () => {}, { demoMode = false } = {})
   // List a run's chain.
   r.get(
     '/runs/:runId/audit',
+    requireAny,
     wrap(async (req, res) => {
       res.json(await getChain(db, req.params.runId))
     }),
@@ -36,6 +39,7 @@ export function auditRouter(db, broadcast = () => {}, { demoMode = false } = {})
   // Verify chain integrity. 200 with { valid: true } or { valid: false, brokenAt, ... }.
   r.post(
     '/runs/:runId/audit/verify',
+    requireAny,
     wrap(async (req, res) => {
       res.json(await verifyRun(db, req.params.runId))
     }),
@@ -47,6 +51,7 @@ export function auditRouter(db, broadcast = () => {}, { demoMode = false } = {})
   // DEMO: real DB mutation of a past event's payload (does not fix the hash).
   r.post(
     '/runs/:runId/audit/:seq/tamper',
+    requireAdmin,
     wrap(async (req, res) => {
       const row = await tamperEvent(
         db,

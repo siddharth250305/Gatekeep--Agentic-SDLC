@@ -1,10 +1,16 @@
 import http from 'node:http'
-import { WebSocketServer } from 'ws'
 import { createApp } from './app.js'
+import { createRealtimeHub } from './realtime.js'
 import { pool, runSchema } from './db.js'
 import { seed } from './runs/seed.js'
+import { countUsers } from './auth/service.js'
 
 await runSchema(pool)
+
+if ((await countUsers(pool)) === 0) {
+  console.warn('No reviewer accounts yet. Create one with:')
+  console.warn('  npm run user:create -- --username <name> --role Admin')
+}
 
 // Seed demo runs only when explicitly requested via SEED_DEMO=true
 if (process.env.SEED_DEMO === 'true') {
@@ -15,20 +21,11 @@ if (process.env.SEED_DEMO === 'true') {
   }
 }
 
-// WebSocket hub for live run progression.
-const clients = new Set()
-function broadcast(msg) {
-  const s = JSON.stringify(msg)
-  for (const c of clients) if (c.readyState === 1) c.send(s)
-}
-
-const app = createApp(pool, broadcast)
+// Live run updates over WebSocket (login required, see realtime.js).
+const hub = createRealtimeHub(pool)
+const app = createApp(pool, hub.broadcast)
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server })
-wss.on('connection', (ws) => {
-  clients.add(ws)
-  ws.on('close', () => clients.delete(ws))
-})
+hub.attach(server)
 
 const port = process.env.PORT || 4040
 server.listen(port, () => {
