@@ -1,7 +1,8 @@
 import { Router } from 'express'
-import { bearerToken, requireAny } from '../auth/middleware.js'
+import { bearerToken, requireAny, requireHuman } from '../auth/middleware.js'
 import { createLimiter } from '../auth/rateLimit.js'
 import { login, logout } from '../auth/service.js'
+import { wsTickets } from '../auth/tickets.js'
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
@@ -12,6 +13,7 @@ export function authRouter(db, {
   // address, in each 15-minute window.
   maxFailuresPerUser = 5,
   maxAttemptsPerAddress = 30,
+  tickets = wsTickets,
 } = {}) {
   const r = Router()
   const perUser = createLimiter({ max: maxFailuresPerUser, windowMs: WINDOW_MS })
@@ -43,6 +45,12 @@ export function authRouter(db, {
   }))
 
   r.get('/auth/me', requireAny, (req, res) => res.json(req.principal))
+
+  // A single-use, short-lived ticket for opening the live-update WebSocket,
+  // so the session token never appears in a URL. Agents use a bearer header.
+  r.post('/auth/ws-ticket', requireHuman, (req, res) => {
+    res.json({ ticket: tickets.issue(bearerToken(req)), expiresInMs: tickets.ttlMs })
+  })
 
   return r
 }

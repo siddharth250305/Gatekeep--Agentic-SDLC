@@ -127,11 +127,13 @@ test('a reviewer cannot use the agent-only write routes', async () => {
     })
     assert.equal((await put('/runs/RUN-0427/phases/code', { state: 'approved' })).status, 403)
     assert.equal((await put('/runs/RUN-0427/tests', { status: 'Passed' })).status, 403)
+    // There is no PATCH /runs/:id any more (B1), for anyone.
     const patch = await fetch(`${base}/runs/RUN-0427`, {
       method: 'PATCH', headers: { 'content-type': 'application/json', ...human }, body: JSON.stringify({ status: 'approved' }),
     })
-    assert.equal(patch.status, 403)
-    assert.equal((await post(base, '/runs/RUN-0427/audit', human, { event: 'g2.approved', actor: 'alice' })).status, 403)
+    assert.equal(patch.status, 404)
+    assert.equal((await post(base, '/runs/RUN-0427/audit', human, { event: 'mcp.file.written' })).status, 403)
+    assert.equal((await post(base, '/runs/RUN-0427/actions/request_review', human, {})).status, 403)
   })
 })
 
@@ -199,8 +201,8 @@ test('an agent cannot write comments through the artifacts route', async () => {
     assert.equal((await put({ comments: [] })).status, 403)
     const after = (await (await fetch(`${base}/runs/RUN-0427`, { headers: agent })).json()).comments
     assert.deepEqual(after, before)
-    // Other artifact fields still go through.
-    assert.equal((await put({ summary: { title: 'ok' } })).status, 200)
+    // RUN-0427 waits at Gate 3, so even its summary is frozen for the reviewer.
+    assert.equal((await put({ summary: { title: 'ok' } })).status, 409)
   })
 })
 

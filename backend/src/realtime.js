@@ -1,8 +1,9 @@
 // WebSocket hub for live run updates.
 //
-// Connecting requires a valid token (browsers pass ?token=<session token>,
-// because they cannot set headers on a WebSocket) and, for browsers, an
-// allowed Origin. The hub only pushes messages; anything a client sends is
+// Connecting requires a valid login and, for browsers, an allowed Origin.
+// Browsers cannot set headers on a WebSocket, so they pass ?ticket=<ticket>
+// from POST /auth/ws-ticket (single use, expires in seconds); the session
+// token itself never goes in the URL. Agent services send a bearer header. The hub only pushes messages; anything a client sends is
 // ignored, and frames are capped at 1 KB.
 //
 // A login is checked again every `recheckMs` while the socket stays open, so a
@@ -11,8 +12,9 @@
 import { WebSocketServer } from 'ws'
 import { allowedOrigins } from './app.js'
 import { resolveToken } from './auth/service.js'
+import { wsTickets } from './auth/tickets.js'
 
-export function createRealtimeHub(db, { uiOrigins = allowedOrigins(), recheckMs = 30_000 } = {}) {
+export function createRealtimeHub(db, { uiOrigins = allowedOrigins(), recheckMs = 30_000, tickets = wsTickets } = {}) {
   const clients = new Set()
   const tokens = new Map() // socket -> the token it connected with
 
@@ -22,9 +24,10 @@ export function createRealtimeHub(db, { uiOrigins = allowedOrigins(), recheckMs 
   }
 
   function tokenFrom(req) {
-    const url = new URL(req.url, 'http://localhost')
     const header = req.headers.authorization || ''
-    return url.searchParams.get('token') || (header.startsWith('Bearer ') ? header.slice(7) : null)
+    if (header.startsWith('Bearer ')) return header.slice(7)
+    const ticket = new URL(req.url, 'http://localhost').searchParams.get('ticket')
+    return ticket ? tickets.redeem(ticket) : null
   }
 
   async function verifyClient({ origin, req }, done) {
