@@ -5,7 +5,7 @@ def test_repository_tools_allowed_in_all_phases():
     """Verify that repository tools are allowed in every phase."""
     engine = PolicyEngine()
     tools = ["get_repository_context", "list_files", "read_file", "search_code"]
-    phases = ["req", "g1", "design", "g2", "code", "out"]
+    phases = ["req", "g1", "design", "g2", "code", "g3"]
     
     for tool in tools:
         for phase in phases:
@@ -43,15 +43,38 @@ def test_coding_tools_only_in_code_phase():
         for phase in ["req", "design"]:
             assert engine.check_tool(phase, tool).allowed is False
 
-def test_approval_tools_allowed_in_all_phases():
-    """Verify request_approval, get_approval_status, get_audit_log work everywhere."""
+def test_status_tools_allowed_in_all_phases():
+    """get_approval_status and get_audit_log are read-only and work everywhere."""
     engine = PolicyEngine()
-    tools = ["request_approval", "get_approval_status", "get_audit_log"]
-    phases = ["req", "g1", "design", "g2", "code", "out"]
-    
-    for tool in tools:
-        for phase in phases:
+    for tool in ["get_approval_status", "get_audit_log"]:
+        for phase in ["req", "g1", "design", "g2", "code", "g3"]:
             assert engine.check_tool(phase, tool).allowed is True
+
+
+def test_phases_match_the_backend_state_machine():
+    # The steps where a robot or reviewer can act (backend runs/machine.js).
+    # 'out' is gone; 'done' and 'cancelled' are final, so no tool runs there.
+    assert PolicyEngine.VALID_PHASES == ["req", "g1", "design", "g2", "code", "g3"]
+
+
+def test_request_approval_only_from_code_or_gate_3():
+    """B3: asking for review moves Code to Gate 3; at Gate 3 a repeat is a no-op."""
+    engine = PolicyEngine()
+    assert engine.check_tool("code", "request_approval").allowed is True
+    assert engine.check_tool("g3", "request_approval").allowed is True
+    for phase in ["req", "g1", "design", "g2"]:
+        assert engine.check_tool(phase, "request_approval").allowed is False
+
+
+def test_coding_tools_are_closed_at_gate_3():
+    engine = PolicyEngine()
+    for tool in ["apply_patch", "write_file", "run_tests", "submit_design", "submit_requirements"]:
+        assert engine.check_tool("g3", tool).allowed is False
+
+
+def test_the_policy_has_no_transition_rules_of_its_own():
+    # One source of truth: only the backend state machine decides moves.
+    assert not hasattr(PolicyEngine, "check_phase_transition")
 
 def test_unknown_phase_rejected():
     """Verify that an invalid phase like 'invalid' is rejected."""
@@ -99,29 +122,6 @@ def test_path_traversal_blocked():
     assert result.allowed is False
     assert "Path traversal" in result.reason
 
-def test_valid_phase_transition():
-    """Verify req → g1, g1 → design, design → g2, g2 → code, code → out are all valid."""
-    engine = PolicyEngine()
-    transitions = [("req", "g1"), ("g1", "design"), ("design", "g2"), ("g2", "code"), ("code", "out")]
-    
-    for current, target in transitions:
-        result = engine.check_phase_transition(current, target)
-        assert result.allowed is True
-
-def test_backward_transition_blocked():
-    """Verify design → req is blocked."""
-    engine = PolicyEngine()
-    result = engine.check_phase_transition("design", "req")
-    assert result.allowed is False
-    assert "backward" in result.reason.lower()
-
-def test_skip_transition_blocked():
-    """Verify req → design (skipping g1) is blocked."""
-    engine = PolicyEngine()
-    result = engine.check_phase_transition("req", "design")
-    assert result.allowed is False
-    assert "skip phases" in result.reason.lower()
-
 def test_get_phase_permissions_for_req_and_code():
     """Verify get_phase_permissions accurately partitions allowed and denied tools per phase."""
     engine = PolicyEngine()
@@ -167,23 +167,37 @@ def test_backslash_paths_are_checked_like_slash_paths(path):
 # ── B0: no active phase means deny, not "requirements" ──────────────────
 
 def _steps(*states):
-    keys = ["req", "g1", "design", "g2", "code", "out"]
+    keys = ["req", "g1", "design", "g2", "code", "g3", "done"]
     return {"steps": [{"key": k, "state": s} for k, s in zip(keys, states)]}
 
 
 def test_current_phase_is_the_active_step():
-    run = _steps("approved", "approved", "active", "pending", "pending", "pending")
+    run = _steps("approved", "approved", "active", "pending", "pending", "pending", "pending")
     assert PolicyEngine.current_phase(run) == "design"
 
 
-def test_current_phase_of_a_fresh_run_is_requirements():
-    run = _steps("pending", "pending", "pending", "pending", "pending", "pending")
-    assert PolicyEngine.current_phase(run) == "req"
+def test_current_phase_comes_from_the_backend_step_first():
+    # The backend's step is the source of truth; phase rows are only display.
+    run = {**_steps("active", "pending", "pending", "pending", "pending", "pending", "pending"), "step": "g3"}
+    assert PolicyEngine.current_phase(run) == "g3"
+
+
+@pytest.mark.parametrize("step", ["done", "cancelled", None, "out", "Requirements"])
+def test_a_finished_cancelled_or_unknown_step_has_no_phase(step):
+    run = {**_steps("approved", "approved", "active", "pending", "pending", "pending", "pending"), "step": step}
+    assert PolicyEngine.current_phase(run) is None
+
+
+def test_a_run_with_nothing_active_is_not_guessed_to_be_at_requirements():
+    # B0/B2: no guessing. An all-pending run (from before the state machine)
+    # has no active step, so tools are denied.
+    run = _steps("pending", "pending", "pending", "pending", "pending", "pending", "pending")
+    assert PolicyEngine.current_phase(run) is None
 
 
 @pytest.mark.parametrize("states", [
-    ("approved", "approved", "approved", "rejected", "pending", "pending"),   # rejected at Gate 2
-    ("approved", "approved", "approved", "approved", "approved", "approved"), # finished
+    ("approved", "approved", "approved", "rejected", "pending", "pending", "pending"),   # old-style reject
+    ("approved", "approved", "approved", "approved", "approved", "approved", "approved"), # finished
 ])
 def test_current_phase_of_a_rejected_or_finished_run_is_none(states):
     # Before B0 these fell back to "req", which let the agent resubmit

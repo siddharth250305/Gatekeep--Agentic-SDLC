@@ -1,8 +1,7 @@
 // Seed demo runs matching the frontend, with REAL audit events so verify works
 // and the tamper demo has a live target. Idempotent: skips runs that exist.
 
-import { appendEvent } from '../audit/service.js'
-import { createRun, updateRun, upsertPhase, upsertTests, upsertArtifacts } from './service.js'
+import { cancelRun, createRun, decideGate, recordPhaseMetrics, robotAction, upsertTests, upsertArtifacts } from './service.js'
 
 const SANDBOX = { status: 'Completed', image: 'python:3.12-slim', network: 'Disabled', memory: '512 MB', cpu: '1 core', timeout: '30 seconds' }
 
@@ -66,6 +65,27 @@ const RUN_0427_ARTIFACTS = {
   comments: [],
 }
 
+// Demo runs are walked through the real state machine, so their steps and
+// audit chains look exactly like a real run's. The reviewers below are demo
+// names (no login accounts are created for them).
+const DEMO = {
+  requester: { id: null, username: 'ml-priya', role: 'Planner' },
+  planner: { id: null, username: 'ml-priya', role: 'Planner' },
+  engineer: { id: null, username: 'o-lindqvist', role: 'Engineer' },
+  reviewer: { id: null, username: 'adrt25', role: 'Engineer' },
+}
+
+async function walk(db, runId, moves) {
+  for (const m of moves) {
+    const out = m.robot
+      ? await robotAction(db, runId, m.robot, { agent: 'seed' })
+      : m.cancel
+        ? await cancelRun(db, runId, { user: m.by, feedback: m.feedback })
+        : await decideGate(db, runId, { decision: m.decide, target: m.target, user: m.by, feedback: m.feedback })
+    if (out.error) throw new Error(`seed ${runId}: ${JSON.stringify(m)} -> ${out.error}`)
+  }
+}
+
 export async function seed(db) {
   if (!(await has(db, 'RUN-0427'))) {
     await createRun(db, {
@@ -73,19 +93,21 @@ export async function seed(db) {
       brief: 'Add rate limiting to the checkout webhook',
       description: 'Implement rate limiting (60 req/min per merchant) for the checkout webhook. Return 429 with Retry-After. Exempt internal reconciliation traffic.',
       repo: 'commerce-core', branch: 'feat/webhook-throttle', commit: '9f3c2e1',
+      createdBy: DEMO.requester,
     })
-    await upsertPhase(db, 'RUN-0427', 'req', { state: 'approved', status: 'Approved', at: 'Sep 17, 10:24', cost_usd: 0.12, input_tokens: 2800, output_tokens: 1380, model: 'claude', duration_ms: 96000 })
-    await upsertPhase(db, 'RUN-0427', 'g1', { state: 'approved', status: 'Approved', at: 'Sep 17, 10:32' })
-    await upsertPhase(db, 'RUN-0427', 'design', { state: 'approved', status: 'Approved', at: 'Sep 17, 11:02', cost_usd: 0.16, input_tokens: 4100, output_tokens: 2140, model: 'claude', duration_ms: 148000 })
-    await upsertPhase(db, 'RUN-0427', 'g2', { state: 'approved', status: 'Approved', at: 'Sep 17, 11:15' })
-    await upsertPhase(db, 'RUN-0427', 'code', { state: 'active', status: 'Ready for review', cost_usd: 0.14, input_tokens: 5200, output_tokens: 2800, model: 'claude', duration_ms: 267000 })
+    await recordPhaseMetrics(db, 'RUN-0427', 'req', { cost_usd: 0.12, input_tokens: 2800, output_tokens: 1380, model: 'agent-model', duration_ms: 96000 })
+    await recordPhaseMetrics(db, 'RUN-0427', 'design', { cost_usd: 0.16, input_tokens: 4100, output_tokens: 2140, model: 'agent-model', duration_ms: 148000 })
+    await recordPhaseMetrics(db, 'RUN-0427', 'code', { cost_usd: 0.14, input_tokens: 5200, output_tokens: 2800, model: 'agent-model', duration_ms: 267000 })
     await upsertTests(db, 'RUN-0427', { ...SANDBOX, passed: 14, failed: 0, total: 14, iterations: 2, duration_ms: 267000 })
     await upsertArtifacts(db, 'RUN-0427', RUN_0427_ARTIFACTS)
-    await updateRun(db, 'RUN-0427', { status: 'awaiting_gate', gate: 'Engineer' })
-    await appendEvent(db, { runId: 'RUN-0427', event: 'run.created', actor: 'ml-priya' })
-    await appendEvent(db, { runId: 'RUN-0427', event: 'requirements.approved', actor: 'ml-priya' })
-    await appendEvent(db, { runId: 'RUN-0427', event: 'design.approved', actor: 'o-lindqvist', payload: { file: 'app/middleware/throttle.py' } })
-    await appendEvent(db, { runId: 'RUN-0427', event: 'coding.completed', actor: 'code-agent', payload: { tests: '14/14' } })
+    // Waiting at Gate 3 for an Engineer.
+    await walk(db, 'RUN-0427', [
+      { robot: 'submit_requirements' },
+      { decide: 'approve', by: DEMO.planner },
+      { robot: 'submit_design' },
+      { decide: 'approve', by: DEMO.engineer },
+      { robot: 'request_review' },
+    ])
   } else {
     // If RUN-0427 already exists in DB, ensure artifacts are populated
     await upsertArtifacts(db, 'RUN-0427', RUN_0427_ARTIFACTS)
@@ -96,13 +118,15 @@ export async function seed(db) {
       runId: 'RUN-0426', brief: 'Migrate audit export to signed URLs',
       description: 'Replace public export links with time-boxed signed URLs (15 min TTL) scoped to reviewer identity.',
       repo: 'gatekeep-core', branch: 'feat/signed-exports', commit: '2b70a91',
+      createdBy: DEMO.requester,
     })
-    await upsertPhase(db, 'RUN-0426', 'req', { state: 'approved', status: 'Approved', at: 'Sep 19, 13:31', cost_usd: 0.11, input_tokens: 2600, output_tokens: 1300, duration_ms: 88000 })
-    await upsertPhase(db, 'RUN-0426', 'g1', { state: 'approved', status: 'Approved', at: 'Sep 19, 13:38' })
-    await upsertPhase(db, 'RUN-0426', 'design', { state: 'active', status: 'In progress', cost_usd: 0.16, input_tokens: 5000, output_tokens: 3000, duration_ms: 314000 })
-    await updateRun(db, 'RUN-0426', { status: 'running' })
-    await appendEvent(db, { runId: 'RUN-0426', event: 'run.created', actor: 'ml-priya' })
-    await appendEvent(db, { runId: 'RUN-0426', event: 'requirements.approved', actor: 'ml-priya' })
+    await recordPhaseMetrics(db, 'RUN-0426', 'req', { cost_usd: 0.11, input_tokens: 2600, output_tokens: 1300, duration_ms: 88000 })
+    await recordPhaseMetrics(db, 'RUN-0426', 'design', { cost_usd: 0.16, input_tokens: 5000, output_tokens: 3000, duration_ms: 314000 })
+    // The robot is working on the design.
+    await walk(db, 'RUN-0426', [
+      { robot: 'submit_requirements' },
+      { decide: 'approve', by: DEMO.planner },
+    ])
   }
 
   if (!(await has(db, 'RUN-0425'))) {
@@ -110,17 +134,22 @@ export async function seed(db) {
       runId: 'RUN-0425', brief: 'Fix flaky retry test in scheduler',
       description: 'Stabilise a retry test that intermittently fails under load. No behavioural change to the scheduler itself.',
       repo: 'gatekeep-core', branch: 'fix/scheduler-retry', commit: '7d3108a',
+      createdBy: { id: null, username: 'j-abera', role: 'Engineer' },
     })
-    await upsertPhase(db, 'RUN-0425', 'req', { state: 'approved', status: 'Approved', at: 'Sep 19, 11:56', cost_usd: 0.1, input_tokens: 2400, output_tokens: 1200, duration_ms: 79000 })
-    await upsertPhase(db, 'RUN-0425', 'g1', { state: 'approved', status: 'Approved', at: 'Sep 19, 12:01' })
-    await upsertPhase(db, 'RUN-0425', 'design', { state: 'approved', status: 'Approved', at: 'Sep 19, 12:10', cost_usd: 0.15, input_tokens: 3900, output_tokens: 2050, duration_ms: 141000 })
-    await upsertPhase(db, 'RUN-0425', 'g2', { state: 'approved', status: 'Approved', at: 'Sep 19, 12:18' })
-    await upsertPhase(db, 'RUN-0425', 'code', { state: 'rejected', status: 'Rejected', at: 'Sep 19, 12:33', cost_usd: 0.26, input_tokens: 7500, output_tokens: 4000, duration_ms: 470000 })
+    await recordPhaseMetrics(db, 'RUN-0425', 'req', { cost_usd: 0.1, input_tokens: 2400, output_tokens: 1200, duration_ms: 79000 })
+    await recordPhaseMetrics(db, 'RUN-0425', 'design', { cost_usd: 0.15, input_tokens: 3900, output_tokens: 2050, duration_ms: 141000 })
+    await recordPhaseMetrics(db, 'RUN-0425', 'code', { cost_usd: 0.26, input_tokens: 7500, output_tokens: 4000, duration_ms: 470000 })
     await upsertTests(db, 'RUN-0425', { ...SANDBOX, passed: 11, failed: 3, total: 14, iterations: 3, duration_ms: 312000 })
-    await updateRun(db, 'RUN-0425', { status: 'rejected' })
-    await appendEvent(db, { runId: 'RUN-0425', event: 'run.created', actor: 'j-abera' })
-    await appendEvent(db, { runId: 'RUN-0425', event: 'design.approved', actor: 'o-lindqvist' })
-    await appendEvent(db, { runId: 'RUN-0425', event: 'coding.rejected', actor: 'adrt25', payload: { reason: 'fake clock leaked into prod path' } })
+    // Sent back from Gate 3, then cancelled.
+    await walk(db, 'RUN-0425', [
+      { robot: 'submit_requirements' },
+      { decide: 'approve', by: DEMO.planner },
+      { robot: 'submit_design' },
+      { decide: 'approve', by: DEMO.engineer },
+      { robot: 'request_review' },
+      { decide: 'reject', target: 'code', by: DEMO.reviewer, feedback: 'fake clock leaked into prod path' },
+      { cancel: true, by: DEMO.reviewer, feedback: 'superseded by a scheduler rewrite' },
+    ])
   }
 
   return listCount(db)

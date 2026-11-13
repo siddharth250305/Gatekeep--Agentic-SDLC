@@ -1,13 +1,22 @@
 import { useState } from 'react'
 import { X, MessageSquare, CircleAlert, RefreshCw } from 'lucide-react'
 
+// Gate 3 can send the work back to Code or to Design; Gates 1 and 2 always
+// go back to the step before them, so they offer no choice.
+const GATE3_TARGETS = [
+  { value: 'code', label: 'Code', hint: 'Fix the implementation; the approved design stands.' },
+  { value: 'design', label: 'Design', hint: 'The approach is wrong; redo the design and pass Gate 2 again.' },
+]
+
 export default function ReworkModal({ isOpen, onClose, onConfirm, run, reviewerRole }) {
   const [feedback, setFeedback] = useState('')
+  const [target, setTarget] = useState('code')
   const [submitting, setSubmitting] = useState(false)
 
   if (!isOpen) return null
 
   const comments = run?.comments || []
+  const atGate3 = run?.step === 'g3'
 
   const handleSubmit = async () => {
     setSubmitting(true)
@@ -27,7 +36,7 @@ export default function ReworkModal({ isOpen, onClose, onConfirm, run, reviewerR
         compiled = 'Please review and rework the latest phase according to standard conventions.'
       }
 
-      await onConfirm(compiled)
+      await onConfirm(compiled, atGate3 ? target : undefined)
       onClose()
     } finally {
       setSubmitting(false)
@@ -62,6 +71,37 @@ export default function ReworkModal({ isOpen, onClose, onConfirm, run, reviewerR
           Rejecting the active gate with feedback loops back to the respective agent phase (Requirements, Design, or Coding). The agent will autonomously address your comments and re-run sandbox tests.
         </p>
 
+        {atGate3 && (
+          <fieldset className="mt-4">
+            <legend className="text-[12px] font-semibold text-ink dark:text-white">Send the work back to</legend>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {GATE3_TARGETS.map((t) => (
+                <label
+                  key={t.value}
+                  className={`flex cursor-pointer items-start gap-2.5 rounded-2xl border p-3 text-[12px] transition-colors ${
+                    target === t.value
+                      ? 'border-accent bg-accent/[0.06] dark:bg-accent/[0.12]'
+                      : 'border-black/[0.08] dark:border-white/[0.12] hover:bg-black/[0.03] dark:hover:bg-white/[0.05]'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="rework-target"
+                    value={t.value}
+                    checked={target === t.value}
+                    onChange={() => setTarget(t.value)}
+                    className="mt-0.5 accent-[#0071e3]"
+                  />
+                  <span>
+                    <span className="block font-semibold text-ink dark:text-white">{t.label}</span>
+                    <span className="block text-muted dark:text-[#a1a1aa]">{t.hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+
         {/* Existing review comments summary */}
         <div className="mt-4">
           <div className="flex items-center justify-between text-[12px] font-semibold text-ink dark:text-white">
@@ -70,7 +110,7 @@ export default function ReworkModal({ isOpen, onClose, onConfirm, run, reviewerR
               <span>Pending Review Comments ({comments.length})</span>
             </span>
             <span className="rounded-full bg-black/[0.04] dark:bg-white/[0.08] px-2 py-0.5 text-[10.5px] font-mono text-faint dark:text-[#a1a1aa]">
-              Acting as {reviewerRole}
+              Signed in as {reviewerRole}
             </span>
           </div>
 

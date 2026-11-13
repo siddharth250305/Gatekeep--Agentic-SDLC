@@ -27,51 +27,55 @@ npm start                        # API on :4040 (creates the table on boot)
 ## Test
 
 ```bash
-npm test        # 11 tests, uses in-memory Postgres (pg-mem), no infra needed
+npm test        # in-memory Postgres (pg-mem), no infra needed
+npm run test:pg # the same suite on a real Postgres, including the locking tests
 ```
 
 ## API
 
-**Runs (Layer 2 - run state)**
+**Runs (run state, owned by the state machine in `src/runs/machine.js`)**
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET  | `/runs` | list runs (id, brief, status, cost) |
-| POST | `/runs` | create `{ brief, description?, repo?, branch?, commit?, runId? }` (seeds the 6-phase pipeline) |
-| GET  | `/runs/:runId` | full assembled run: steps + totals + sandbox + tests + audit chain + verified |
-| PATCH | `/runs/:runId` | update `{ status?, gate? }` |
-| PUT | `/runs/:runId/phases/:key` | update a phase `{ state?, status?, at?, cost_usd?, input_tokens?, output_tokens?, model?, duration_ms? }` |
-| PUT | `/runs/:runId/tests` | upsert sandbox + test result |
+| Method | Path | Who | Purpose |
+|--------|------|-----|---------|
+| GET  | `/runs` | any login | list runs (id, brief, status, cost) |
+| POST | `/runs` | reviewer | create `{ brief, description?, repo?, branch?, commit?, runId? }`; starts at Requirements; the reviewer is recorded as the requester |
+| GET  | `/runs/:runId` | any login | full run: `step`, steps, totals, sandbox, tests, audit chain, verified |
+| POST | `/runs/:runId/start` | reviewer | start the agent pipeline; only once, only at Requirements (409 otherwise) |
+| POST | `/runs/:runId/decide` | reviewer | `{ decision: approve\|reject, gate?, target?, feedback? }`; `gate` is the step the reviewer was looking at (409 if the run moved on); at Gate 3 a reject needs `target: code\|design` |
+| POST | `/runs/:runId/cancel` | reviewer | `{ reason? }`; Planner, Engineer or Admin, from any active step |
+| POST | `/runs/:runId/actions/:action` | agent | `submit_requirements`, `submit_design` or `request_review`, with optional `{ artifacts, details }`; artifacts are stored only if the move is allowed; a repeat returns 200 unchanged |
+| PUT | `/runs/:runId/phases/:key` | agent | metrics only `{ cost_usd?, input_tokens?, output_tokens?, model?, duration_ms? }`; `state`, `status`, `at` get 403 |
+| PUT | `/runs/:runId/tests` | agent | upsert sandbox + test result |
 
-**Audit chain (Layer 1)**
+There is no `PATCH /runs/:runId`. Refusals: 400 bad input, 403 wrong role or the requester at Gate 3, 404 unknown run, 409 move not allowed / run finished / stale gate.
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/runs/:runId/audit` | append `{ event, actor, payload? }` |
-| GET  | `/runs/:runId/audit` | list the run's chain |
-| POST | `/runs/:runId/audit/verify` | verify integrity |
-| POST | `/runs/:runId/audit/:seq/tamper` | DEMO: real DB mutation of `payload` |
+**Audit chain**
+
+| Method | Path | Who | Purpose |
+|--------|------|-----|---------|
+| POST | `/runs/:runId/audit` | agent | record agent work `{ event, payload? }`; `event` must start with `mcp.`, `repo.`, `workspace.`, `sandbox.` or `pipeline.`; the server sets the actor (the token's name) and the time, and refuses `actor` / `createdAt` |
+| GET  | `/runs/:runId/audit` | any login | list the run's chain |
+| POST | `/runs/:runId/audit/verify` | any login | verify integrity |
+| POST | `/runs/:runId/audit/:seq/tamper` | Admin, demo mode only | DEMO: real DB mutation of `payload` |
+
+**Live updates**: `POST /auth/ws-ticket` (reviewer) returns a single-use ticket valid for 30 s; the dashboard connects to `ws://…/?ticket=…`. Agent services connect with an `Authorization: Bearer` header.
 
 Seed the 3 demo runs (RUN-0427/0426/0425) with real chains: `npm run seed`.
 
 ## Demo: watch the chain break
 
+Start the backend with `GATEKEEP_DEMO_MODE=1 SEED_DEMO=true`, then, with an Admin's session token in `$ADMIN`:
+
 ```bash
 R=RUN-0427
-curl -s -XPOST localhost:4040/runs/$R/audit -H 'content-type: application/json' \
-  -d '{"event":"run.created","actor":"ml-priya"}'
-curl -s -XPOST localhost:4040/runs/$R/audit -H 'content-type: application/json' \
-  -d '{"event":"design.approved","actor":"o-lindqvist","payload":{"file":"throttle.py"}}'
+curl -s -XPOST localhost:4040/runs/$R/audit/verify -H "authorization: Bearer $ADMIN"   # { "valid": true, ... }
 
-curl -s -XPOST localhost:4040/runs/$R/audit/verify        # { "valid": true, "length": 2 }
+# Real database mutation of a past event's payload:
+curl -s -XPOST localhost:4040/runs/$R/audit/2/tamper -H "authorization: Bearer $ADMIN" \
+  -H 'content-type: application/json' -d '{"payload":{"file":"backdoor.py"}}'
 
-# Real database mutation of the approved event's payload:
-curl -s -XPOST localhost:4040/runs/$R/audit/2/tamper -H 'content-type: application/json' \
-  -d '{"payload":{"file":"backdoor.py"}}'
-
-curl -s -XPOST localhost:4040/runs/$R/audit/verify
-# { "valid": false, "brokenAt": 2, "reason": "hash_mismatch",
-#   "recomputedHash": "…", "storedHash": "…" }
+curl -s -XPOST localhost:4040/runs/$R/audit/verify -H "authorization: Bearer $ADMIN"
+# { "valid": false, "brokenAt": 2, "reason": "hash_mismatch", ... }
 ```
 
 ## Next layers (build on this)

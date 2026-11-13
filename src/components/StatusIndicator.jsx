@@ -2,6 +2,7 @@
 const STATUS = {
   approved:  { label: 'Approved',  color: 'green', live: false },
   rejected:  { label: 'Rejected',  color: 'red',   live: false },
+  cancelled: { label: 'Cancelled', color: 'red',   live: false },
   active:    { label: 'In review', color: 'amber', live: true },
   awaiting:  { label: 'Awaiting',  color: 'amber', live: true },
   running:   { label: 'Running',   color: 'blue',  live: true },

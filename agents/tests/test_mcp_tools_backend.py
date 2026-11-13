@@ -14,7 +14,7 @@ BASE = "http://test-backend"
 
 
 def _run(active=None, status="running", **extra):
-    keys = ["req", "g1", "design", "g2", "code", "out"]
+    keys = ["req", "g1", "design", "g2", "code", "g3", "done"]
     steps = []
     for k in keys:
         if active is None:
@@ -24,7 +24,7 @@ def _run(active=None, status="running", **extra):
         else:
             state = "approved" if keys.index(k) < keys.index(active) else "pending"
         steps.append({"key": k, "state": state, "status": state.title()})
-    return {"id": "RUN-1", "status": status, "gate": None, "brief": "add rate limiting",
+    return {"id": "RUN-1", "status": status, "gate": None, "brief": "add rate limiting", "step": active or "done",
             "repo": "https://example.com/r.git", "commit": "abc123", "steps": steps, **extra}
 
 
@@ -146,13 +146,36 @@ def test_requirements_context_reports_the_active_phase(gk, backend):
     assert gk.get_requirements_context("s1") == {"requirements": "R1", "status": "running", "phase": "req"}
 
 
-def test_submit_requirements_stores_them_and_opens_gate_1(gk, backend):
+def _no_state_writes(backend):
+    """B1: the tools never write phase state or run status directly."""
+    assert not [c for c in backend.calls if c[0] == "PUT" and "/phases/" in c[1]]
+    assert not [c for c in backend.calls if c[0] == "PATCH" and c[1].startswith("/runs/")]
+
+
+def test_submit_requirements_stores_them_and_asks_the_backend_to_open_gate_1(gk, backend):
+    backend.routes[("POST", "/runs/RUN-1/actions/submit_requirements")] = (200, _run(active="g1", status="awaiting_gate"))
     out = gk.submit_requirements("s1", "must rate limit")
     assert out["submitted"] is True
-    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == [{"requirements": "must rate limit"}]
-    assert backend.sent("PUT", "/runs/RUN-1/phases/g1")[0]["state"] == "active"
-    assert backend.sent("PATCH", "/runs/RUN-1") == [{"status": "awaiting_gate", "gate": "Planner"}]
-    assert backend.sent("POST", "/runs/RUN-1/audit")[0]["event"] == "mcp.requirements.submitted"
+    assert out["step"] == "g1"
+    # The requirements ride on the move, so they are stored only if it is allowed.
+    assert backend.sent("POST", "/runs/RUN-1/actions/submit_requirements") == [
+        {"artifacts": {"requirements": "must rate limit"}}]
+    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == []
+    _no_state_writes(backend)
+    # The backend writes the step-change audit entry itself (E2).
+    assert backend.sent("POST", "/runs/RUN-1/audit") == []
+
+
+def test_a_refused_submission_is_reported_not_hidden(gk, backend):
+    backend.routes[("POST", "/runs/RUN-1/actions/submit_requirements")] = (
+        409, {"error": "that move is not allowed while the run is at 'design'", "reason": "not_allowed", "step": "design"})
+    out = gk.submit_requirements("s1", "again")
+    assert out["submitted"] is False
+    assert out["step"] == "design"
+    assert "not allowed" in out["error"]
+    # Nothing else is written for a move the backend refused.
+    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == []
+    _no_state_writes(backend)
 
 
 def test_design_context_includes_the_requirements(gk, backend):
@@ -160,18 +183,31 @@ def test_design_context_includes_the_requirements(gk, backend):
     assert gk.get_design_context("s1") == {"design": "D", "requirements": "R", "status": "running"}
 
 
-def test_submit_design_stores_it_and_opens_gate_2(gk, backend):
-    gk.submit_design("s1", "use a token bucket")
-    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == [{"design": "use a token bucket"}]
-    assert backend.sent("PATCH", "/runs/RUN-1") == [{"status": "awaiting_gate", "gate": "Engineer"}]
-    assert backend.sent("POST", "/runs/RUN-1/audit")[0]["event"] == "mcp.design.submitted"
+def test_submit_design_stores_it_and_asks_the_backend_to_open_gate_2(gk, backend):
+    backend.routes[("POST", "/runs/RUN-1/actions/submit_design")] = (200, _run(active="g2", status="awaiting_gate"))
+    out = gk.submit_design("s1", "use a token bucket")
+    assert out["submitted"] is True
+    assert backend.sent("POST", "/runs/RUN-1/actions/submit_design") == [{"artifacts": {"design": "use a token bucket"}}]
+    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == []
+    _no_state_writes(backend)
 
 
 def test_an_optional_audit_failure_is_logged_not_raised(gk, backend, caplog):
     backend.routes[("POST", "/runs/RUN-1/audit")] = (503, {"error": "down"})
-    with caplog.at_level(logging.WARNING, logger="gatekeep.mcp"):
-        assert gk.submit_design("s1", "d")["submitted"] is True
+    with patch("app.mcp.tools.SandboxRunner") as runner, \
+         caplog.at_level(logging.WARNING, logger="gatekeep.mcp"):
+        runner.return_value.run_path.return_value = SANDBOX_RESULT
+        assert gk.run_tests("s1")["status"] == "Passed"
     assert "audit warning" in caplog.text
+
+
+def test_audit_entries_never_carry_a_client_chosen_actor(gk, backend):
+    # E2: the backend stamps the actor from the agent token.
+    with patch("app.mcp.tools.SandboxRunner") as runner:
+        runner.return_value.run_path.return_value = SANDBOX_RESULT
+        gk.run_tests("s1")
+    body = backend.sent("POST", "/runs/RUN-1/audit")[0]
+    assert "actor" not in body and "createdAt" not in body
 
 
 # ── coding, diff and tests ───────────────────────────────────────────────
@@ -192,7 +228,7 @@ SANDBOX_RESULT = {"status": "Passed", "passed": 3, "failed": 0, "total": 3, "exi
                   "duration_ms": 120, "output": "3 passed"}
 
 
-def test_run_tests_reports_results_and_audits(gk, backend):
+def test_run_tests_reports_results_and_audits(gk, backend):  # noqa: D103
     with patch("app.mcp.tools.SandboxRunner") as runner:
         runner.return_value.run_path.return_value = SANDBOX_RESULT
         assert gk.run_tests("s1", "tests/test_x.py") == SANDBOX_RESULT
@@ -218,30 +254,50 @@ def test_get_test_results_reads_the_run(gk, backend):
 # ── approval ─────────────────────────────────────────────────────────────
 
 def test_request_approval_is_a_no_op_while_a_gate_is_open(gk, backend):
-    backend.routes[("GET", "/runs/RUN-1")] = (200, {**_run(active="g2"), "status": "awaiting_gate", "gate": "Engineer"})
+    backend.routes[("GET", "/runs/RUN-1")] = (200, {**_run(active="g3"), "status": "awaiting_gate", "gate": "Engineer"})
     assert gk.request_approval("s1", "done") == {"already_awaiting": True, "gate": "Engineer"}
-    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == []
+    assert backend.sent("POST", "/runs/RUN-1/actions/request_review") == []
 
 
-def test_request_approval_stores_the_summary_and_the_diff(gk, backend):
+def test_request_approval_stores_the_diff_and_moves_code_to_gate_3(gk, backend):
     backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code", tests={"total": 3, "passed": 3}))
+    backend.routes[("POST", "/runs/RUN-1/actions/request_review")] = (
+        200, {**_run(active="g3"), "status": "awaiting_gate", "gate": "Engineer"})
     diff = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n x = 1\n+y = 2\n"
     with patch("app.mcp.tools.workspace_diff", return_value=diff):
         out = gk.request_approval("s1", "Added y.\n\nMore detail.")
     assert out["requested"] is True
-    stored = backend.sent("PUT", "/runs/RUN-1/artifacts")[0]
+    assert out["step"] == "g3"
+    assert out["gate"] == "Engineer"
+    [action] = backend.sent("POST", "/runs/RUN-1/actions/request_review")
+    stored = action["artifacts"]
     assert stored["summary"]["sub"] == "Added y."
     assert "3/3 tests passed in the sandbox" in stored["summary"]["checks"]
     assert [f["path"] for f in stored["files"]] == ["app.py"]
-    assert backend.sent("POST", "/runs/RUN-1/audit")[0]["payload"]["files"] == ["app.py"]
+    # One step change, one audit entry: the file list rides on the move itself.
+    assert action["details"] == {"summary": "Added y.\n\nMore detail.", "files": ["app.py"]}
+    assert backend.sent("POST", "/runs/RUN-1/audit") == []
+    assert backend.sent("PUT", "/runs/RUN-1/artifacts") == []
+    _no_state_writes(backend)
 
 
 def test_request_approval_without_a_diff_still_stores_the_summary(gk, backend):
     backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
+    backend.routes[("POST", "/runs/RUN-1/actions/request_review")] = (200, _run(active="g3", status="awaiting_gate"))
     with patch("app.mcp.tools.workspace_diff", side_effect=OSError("no git")):
         gk.request_approval("s1", "summary")
-    stored = backend.sent("PUT", "/runs/RUN-1/artifacts")[0]
+    stored = backend.sent("POST", "/runs/RUN-1/actions/request_review")[0]["artifacts"]
     assert "files" not in stored and stored["summary"]["checks"][0].startswith("0 file(s)")
+
+
+def test_a_refused_review_request_is_reported(gk, backend):
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
+    backend.routes[("POST", "/runs/RUN-1/actions/request_review")] = (
+        409, {"error": "the run is cancelled and cannot change", "reason": "finished", "step": "cancelled"})
+    with patch("app.mcp.tools.workspace_diff", return_value=""):
+        out = gk.request_approval("s1", "summary")
+    assert out["requested"] is False
+    assert out["step"] == "cancelled"
 
 
 def test_get_approval_status_lists_the_steps(gk, backend):

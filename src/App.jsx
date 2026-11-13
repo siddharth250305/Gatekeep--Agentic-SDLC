@@ -256,7 +256,9 @@ export default function App() {
   }, [refresh, session])
 
   const run = useMemo(() => runs.find((r) => r.id === selectedId) ?? runs[0], [runs, selectedId])
-  const canAct = run?.awaiting
+  // A run from before the state machine has no step; the server refuses every
+  // decision on it, so the dashboard does not offer one.
+  const canAct = Boolean(run?.awaiting && run?.step)
 
   const flash = (msg, ms = 3500) => { setToast(msg); setTimeout(() => setToast(null), ms) }
 
@@ -273,14 +275,20 @@ export default function App() {
     )
   }, [runs, searchQuery])
 
-  const decide = async (decision, feedback = '') => {
+  // target: where a Gate 3 reject sends the work back ('code' or 'design').
+  const decide = async (decision, feedback = '', target) => {
     if (decision === 'reject' && !feedback) {
       setReworkModalOpen(true)
       return
     }
     try {
       // Who decides comes from the login on the server, not from this request.
-      await api.decide(run.id, { decision, feedback })
+      // gate is the step the reviewer is looking at: if the run has moved on
+      // (a double click, a slow network), the server refuses instead of
+      // applying the decision to the next gate.
+      const body = { decision, feedback, gate: run.step }
+      if (target) body.target = target
+      await api.decide(run.id, body)
       flash(decision === 'approve'
         ? `${run.id} approved. Gate advanced.`
         : `${run.id}: rework requested. Feedback sent to agent.`)
@@ -698,6 +706,7 @@ export default function App() {
               <SpecsDesignView
                 run={run}
                 reviewerRole={reviewerRole}
+                currentUser={session.user}
                 onAddComment={handleAddComment}
                 onDeleteComment={handleDeleteComment}
               />
@@ -739,7 +748,7 @@ export default function App() {
         onClose={() => setReworkModalOpen(false)}
         run={run}
         reviewerRole={reviewerRole}
-        onConfirm={(feedback) => decide('reject', feedback)}
+        onConfirm={(feedback, target) => decide('reject', feedback, target)}
       />
 
       {/* New Run Modal */}

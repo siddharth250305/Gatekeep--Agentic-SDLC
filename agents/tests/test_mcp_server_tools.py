@@ -9,7 +9,7 @@ import pytest
 from app.mcp import server
 from app.mcp.session import McpSession
 
-KEYS = ["req", "g1", "design", "g2", "code", "out"]
+KEYS = ["req", "g1", "design", "g2", "code", "g3", "done"]
 
 
 def _run_at(phase):
@@ -52,6 +52,8 @@ GATED = [
     (server.gatekeep_get_diff, (), "get_diff", "code", "req"),
     (server.gatekeep_run_tests, ("tests/",), "run_tests", "code", "design"),
     (server.gatekeep_get_test_results, (), "get_test_results", "code", "req"),
+    # B3: asking for review is only possible from Code (and a no-op at Gate 3).
+    (server.gatekeep_request_approval, ("summary",), "request_approval", "code", "design"),
 ]
 
 
@@ -88,7 +90,6 @@ def test_writes_to_secret_files_are_refused_even_in_the_code_phase(fake):
 UNGATED = [
     (server.gatekeep_get_run, (), "get_run"),
     (server.gatekeep_get_agent_context, (), "get_agent_context"),
-    (server.gatekeep_request_approval, ("summary",), "request_approval"),
     (server.gatekeep_get_approval_status, (), "get_approval_status"),
     (server.gatekeep_get_audit_log, (), "get_audit_log"),
     (server.gatekeep_report_model, ("Opus 5.5",), "report_model"),

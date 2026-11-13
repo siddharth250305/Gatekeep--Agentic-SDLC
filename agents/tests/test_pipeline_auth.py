@@ -35,8 +35,19 @@ def test_resume_with_the_right_secret_reaches_the_pipeline(monkeypatch):
                         headers={"x-gatekeep-pipeline-secret": "s3cret-value"})
     assert r.status_code == 200
     resume.assert_called_once()
-    # The authenticated reviewer and the gate they decided reach the graph.
-    assert resume.call_args.kwargs == {"gate": "g1", "actor": "adesh"}
+    # The gate that was decided and where the backend sent the run reach the
+    # graph. (The reviewer is already in the backend's audit entry.)
+    assert resume.call_args.kwargs == {"gate": "g1", "target": ""}
+
+
+def test_resume_passes_the_backend_target_through(monkeypatch):
+    monkeypatch.setenv("GATEKEEP_PIPELINE_SECRET", "s3cret-value")
+    with patch.object(main, "resume_run", return_value={"resumed": True}) as resume:
+        r = client.post("/pipeline/RUN-1/resume",
+                        json={"decision": "reject", "gate": "g3", "target": "design", "actor": "eli"},
+                        headers={"x-gatekeep-pipeline-secret": "s3cret-value"})
+    assert r.status_code == 200
+    assert resume.call_args.kwargs["target"] == "design"
 
 
 def test_resume_of_an_already_decided_gate_is_409(monkeypatch):

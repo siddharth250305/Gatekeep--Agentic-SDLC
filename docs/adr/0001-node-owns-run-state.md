@@ -28,17 +28,17 @@ Because each one decides state on its own, they disagree. Examples found in revi
 
 This ADR is the target. It is reached step by step:
 
-| Step | Plan item | What changes |
-|---|---|---|
-| 1 | E6 (Milestone 1) | Gate decisions and audit appends run in one transaction with a row lock. |
-| 2 | A1 (Milestone 1) | Every caller is authenticated. Agents and humans get different rights. |
-| 3 | B2 (Milestone 2) | The allowed-moves table lives in the backend. |
-| 4 | B1 (Milestone 2) | The raw `PUT /phases` and `PATCH /runs` back doors are closed to agents. |
-| 5 | G9 (Milestone 5) | The pipeline calls the same backend actions as the MCP server. |
+| Step | Plan item | What changes | Status |
+|---|---|---|---|
+| 1 | E6 (Milestone 1) | Gate decisions and audit appends run in one transaction with a row lock. | Done |
+| 2 | A1 (Milestone 1) | Every caller is authenticated. Agents and humans get different rights. | Done |
+| 3 | B2 (Milestone 2) | The allowed-moves table lives in the backend (`backend/src/runs/machine.js`). | Done |
+| 4 | B1 (Milestone 2) | `PATCH /runs` is removed and `PUT /phases` takes metrics only. Robots move a run only with `POST /runs/:id/actions/:action`. | Done |
+| 5 | G9 (Milestone 5) | The pipeline calls the same backend actions as the MCP server. | Started in Milestone 2: the pipeline now uses the robot actions and no longer writes state. Keep-or-remove and the rest of G9 remain for Milestone 5. |
 
 ## Consequences
 
 - **Good:** one place to read and test the rules; no split-brain between services; the audit log matches the real state.
 - **Good:** both ways of running GateKeep (external agent over MCP, or the built-in agent with an API key) follow the same rules, because neither owns state.
 - **Cost:** the Python services need the backend to be reachable for every state change. When it is not, they must stop and report an error rather than continue. This is the intended fail-closed behaviour.
-- **Cost:** existing direct phase writes in `agents/app/mcp/tools.py` and `agents/app/reporter.py` must be replaced in Milestone 2.
+- **Cost (paid in Milestone 2):** the direct phase writes in `agents/app/mcp/tools.py` and `agents/app/reporter.py` were replaced by robot actions.

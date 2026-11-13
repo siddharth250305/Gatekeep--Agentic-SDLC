@@ -150,7 +150,7 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
               Block Sequence Chain ({targetRun?.id || 'RUN-0427'})
             </h3>
           </div>
-          <span className="font-mono text-[11px] text-faint dark:text-[#8e8e93]">Algorithm: SHA-256 (HMAC signed)</span>
+          <span className="font-mono text-[11px] text-faint dark:text-[#8e8e93]">Algorithm: SHA-256 hash chain</span>
         </div>
 
         {auditChain.length === 0 ? (

@@ -1,7 +1,7 @@
 """FastAPI wrapper around the LangGraph pipeline.
 
 POST /pipeline/{run_id}/start   {brief}            run agents until the first gate
-POST /pipeline/{run_id}/resume  {decision, gate, actor}  resume a paused gate
+POST /pipeline/{run_id}/resume  {decision, gate, target}  continue after the backend recorded a decision
 
 Both endpoints only accept calls from the GateKeep backend, which sends the
 shared secret GATEKEEP_PIPELINE_SECRET after checking the reviewer's login.
@@ -69,10 +69,11 @@ class StartBody(BaseModel):
 
 
 class ResumeBody(BaseModel):
-    decision: str  # "approve" | "reject"
+    decision: str  # "approve" | "reject" | "cancel", already recorded by the backend
     feedback: str = ""
-    actor: str = ""  # the reviewer, as authenticated by the backend
-    gate: str = ""   # the gate being decided (g1 / g2 / code); refused if the run moved on
+    actor: str = ""   # the reviewer (the backend's audit log already names them)
+    gate: str = ""    # the gate that was decided (g1 / g2 / g3); refused if the run moved on
+    target: str = ""  # where the backend sent the run (Gate 3 reject: code or design)
 
 
 @app.get("/health")
@@ -88,9 +89,9 @@ def start(run_id: str, body: StartBody):
 @app.post("/pipeline/{run_id}/resume", dependencies=[Depends(require_backend)])
 def resume(run_id: str, body: ResumeBody):
     out = resume_run(_pipeline, safe_run_id(run_id), body.decision, body.feedback,
-                     gate=body.gate or None, actor=body.actor)
-    # 409 with reason "not_running" -> no live pipeline here; Node falls back.
-    # 409 with reason "stale_gate"  -> the gate was already decided; Node refuses.
+                     gate=body.gate or None, target=body.target)
+    # 409 with reason "not_running" -> no live pipeline here (MCP mode).
+    # 409 with reason "stale_gate"  -> the graph is paused at another gate.
     if out.get("resumed") is False:
         return JSONResponse(out, status_code=409)
     return out

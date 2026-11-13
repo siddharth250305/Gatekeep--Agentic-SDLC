@@ -4,7 +4,9 @@ Every MCP tool call passes through this engine before execution.
 It enforces:
   1. Tool → phase restrictions (e.g., coding tools only in 'code' phase)
   2. File path restrictions (same globs as repository/security.py)
-  3. Sequential phase transition rules
+
+Moving a run between steps is not decided here: only the backend state
+machine (backend/src/runs/machine.js) does that.
 
 The engine is stateless — it receives the current phase and tool name, and
 returns a PolicyResult with allowed/denied + reason.
@@ -29,8 +31,9 @@ class PolicyResult:
 class PolicyEngine:
     """GateKeep MCP policy enforcement."""
 
-    # Canonical phase order (same as DEFAULT_PHASES in backend runs/service.js).
-    VALID_PHASES = ["req", "g1", "design", "g2", "code", "out"]
+    # The steps where something can act, in order (backend runs/machine.js).
+    # 'done' and 'cancelled' are final: no tool runs there.
+    VALID_PHASES = ["req", "g1", "design", "g2", "code", "g3"]
 
     # The one shared list lives in repository/security.py.
     BLOCKED_FILE_PATTERNS = SENSITIVE_GLOBS
@@ -47,7 +50,6 @@ class PolicyEngine:
         "list_files":             _ALL,
         "read_file":              _ALL,
         "search_code":            _ALL,
-        "request_approval":       _ALL,
         "get_approval_status":    _ALL,
         "get_audit_log":          _ALL,
         "report_model":           _ALL,
@@ -67,6 +69,9 @@ class PolicyEngine:
         "get_diff":          ["code"],
         "run_tests":         ["code"],
         "get_test_results":  ["code"],
+
+        # ── review: moves Code to Gate 3; a repeat at Gate 3 is a no-op ──
+        "request_approval":  ["code", "g3"],
     }
 
     def check_tool(self, phase: str, tool_name: str) -> PolicyResult:
@@ -89,17 +94,19 @@ class PolicyEngine:
 
     @staticmethod
     def current_phase(run: dict[str, Any]) -> str | None:
-        """The run's active phase key, or None when no tool may touch the run.
+        """The run's current step, or None when no tool may touch the run.
 
-        A run that has not started yet (every step pending) begins at 'req'.
-        A finished, rejected or malformed run has no active step and returns
-        None, so callers fail closed instead of guessing a phase."""
-        steps = run.get("steps") or []
-        for step in steps:
+        The backend's ``step`` is the source of truth. A finished, cancelled,
+        unknown or missing step returns None, so callers fail closed instead
+        of guessing. Runs from a backend without ``step`` fall back to the
+        phase row marked active; with none active, the answer is None."""
+        if "step" in run:
+            step = run.get("step")
+            return step if step in PolicyEngine.VALID_PHASES else None
+        for step in run.get("steps") or []:
             if step.get("state") == "active":
-                return step.get("key")
-        if steps and all(step.get("state") == "pending" for step in steps):
-            return "req"
+                key = step.get("key")
+                return key if key in PolicyEngine.VALID_PHASES else None
         return None
 
     def check_file_access(self, path: str, write: bool = False) -> PolicyResult:
@@ -121,31 +128,6 @@ class PolicyEngine:
             return PolicyResult(False, f"Cannot {action} '{path}' — blocked by security policy")
 
         return PolicyResult(True, "OK")
-
-    def check_phase_transition(self, current_phase: str, target_phase: str) -> PolicyResult:
-        """Check whether transitioning from *current_phase* → *target_phase* is valid.
-
-        Only forward transitions by exactly one step are allowed.
-        """
-        if current_phase not in self.VALID_PHASES:
-            return PolicyResult(False, f"Unknown current phase '{current_phase}'")
-        if target_phase not in self.VALID_PHASES:
-            return PolicyResult(False, f"Unknown target phase '{target_phase}'")
-
-        cur_idx = self.VALID_PHASES.index(current_phase)
-        tgt_idx = self.VALID_PHASES.index(target_phase)
-
-        if tgt_idx == cur_idx + 1:
-            return PolicyResult(True, "OK")
-
-        if tgt_idx <= cur_idx:
-            return PolicyResult(False, f"Cannot go backward from '{current_phase}' to '{target_phase}'")
-
-        return PolicyResult(
-            False,
-            f"Cannot skip phases: '{current_phase}' → '{target_phase}'. "
-            f"Next phase must be '{self.VALID_PHASES[cur_idx + 1]}'",
-        )
 
     def get_phase_permissions(self, phase: str) -> dict[str, list[str]]:
         """Return allowed and denied tools for the specified pipeline phase."""

@@ -251,7 +251,7 @@ export default function OverviewDashboardView({
           <div className="mt-4 flex-1 space-y-3 text-[12.5px]">
             <div className="flex items-center justify-between">
               <span className="text-muted dark:text-[#a1a1aa]">Ledger Algorithm:</span>
-              <span className="font-mono text-[12px] font-semibold text-ink dark:text-[#f5f5f7]">SHA-256 HMAC</span>
+              <span className="font-mono text-[12px] font-semibold text-ink dark:text-[#f5f5f7]">SHA-256 hash chain</span>
             </div>
 
             <div className="flex items-center justify-between">
@@ -347,8 +347,10 @@ export default function OverviewDashboardView({
                   ? 'Gate Decision Required'
                   : run?.status === 'approved'
                   ? 'Pipeline Completed & Approved'
-                  : run?.status === 'rejected'
-                  ? 'Gate Rejected — Rework Queued'
+                  : run?.status === 'cancelled'
+                  ? 'Run Cancelled'
+                  : (run?.step && run.step !== 'req') || run?.started
+                  ? 'Agent Working'
                   : 'Workflow Ready to Run'}
               </h3>
               <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
@@ -356,7 +358,7 @@ export default function OverviewDashboardView({
                   ? 'bg-accent/15 dark:bg-accent/25 text-accent dark:text-[#409cff]'
                   : run?.status === 'approved'
                   ? 'bg-[#34c759]/15 dark:bg-[#34c759]/25 text-[#17692e] dark:text-[#34c759]'
-                  : run?.status === 'rejected'
+                  : run?.status === 'cancelled'
                   ? 'bg-[#ff3b30]/15 dark:bg-[#ff3b30]/25 text-[#d70015] dark:text-[#ff453a]'
                   : 'bg-black/[0.04] dark:bg-white/[0.08] text-muted dark:text-[#a1a1aa]'
               }`}>
@@ -368,8 +370,10 @@ export default function OverviewDashboardView({
                 ? `Role "${run?.gate || 'Reviewer'}" must approve or request rework to advance the pipeline.`
                 : run?.status === 'approved'
                 ? 'All phases approved and verified against cryptographic audit ledger.'
-                : run?.status === 'rejected'
-                ? 'Rework requested. Awaiting pipeline rerun.'
+                : run?.status === 'cancelled'
+                ? 'This run was cancelled. A cancelled run cannot be reopened.'
+                : (run?.step && run.step !== 'req') || run?.started
+                ? 'The agent is working on this step. The next gate opens when it hands its work over.'
                 : 'Click Start Pipeline to begin agent reasoning, testing, and approval gates.'}
             </p>
           </div>
@@ -399,7 +403,7 @@ export default function OverviewDashboardView({
                 <Check size={16} strokeWidth={2.5} />
                 <span>Production Ready</span>
               </div>
-            ) : (
+            ) : run?.step !== 'req' || run?.started ? null : (
               <button
                 type="button"
                 onClick={() => onStartPipeline && onStartPipeline(run?.id)}

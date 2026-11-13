@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS run_phases (
 
 CREATE INDEX IF NOT EXISTS idx_run_phases ON run_phases (run_id, seq);
 
+-- State machine (B2). step is the run's position: req, g1, design, g2, code,
+-- g3, done or cancelled. Runs from before the state machine have no step and
+-- are refused every move (fail closed). created_by is the reviewer who asked
+-- for the work (they may not give the final approval). started_at makes
+-- Start safe to repeat.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS step TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by BIGINT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS created_by_name TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+
+
 CREATE TABLE IF NOT EXISTS test_results (
   run_id      TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
   status      TEXT NOT NULL DEFAULT 'Idle',

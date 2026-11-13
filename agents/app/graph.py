@@ -11,7 +11,6 @@ import json
 import operator
 import os
 import threading
-from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -69,12 +68,9 @@ class RunState(TypedDict, total=False):
     requirements: str
     design: dict
     code: str
-    status: str  # running | rejected | approved
+    status: str  # running | rework | approved | cancelled
+    target: str  # where a rejected gate sent the work back (Gate 3: code or design)
     metrics: Annotated[list, operator.add]
-
-
-def now_label() -> str:
-    return datetime.now(timezone.utc).strftime("%b %d, %H:%M") + " UTC"
 
 
 SYSTEM_PROMPTS = {
@@ -183,22 +179,19 @@ def _build_design(feature: str, ctx: dict | None) -> dict:
 
 def build_graph(llm, reporter, runner=None, checkpointer=None):
     # --- one agent phase: generate, meter, report -------------------------
-    def run_phase(state, key, kind, actor, final_state):
+    def run_phase(state, key, kind, actor):
         system_inst = SYSTEM_PROMPTS.get(kind)
         res = llm.generate(_prompt(kind, state), kind=kind, system=system_inst)
         cost = cost_usd(res.model, res.input_tokens, res.output_tokens)
         reporter.phase(
             state["run_id"], key,
-            state=final_state,
-            status="Ready for review" if final_state == "active" else "Approved",
             cost_usd=cost,
             input_tokens=res.input_tokens,
             output_tokens=res.output_tokens,
             model=res.model,
             duration_ms=res.duration_ms,
-            at=now_label(),
         )
-        reporter.audit(state["run_id"], f"{kind}.completed", actor, {"chars": len(res.content)})
+        reporter.audit(state["run_id"], f"pipeline.{kind}.completed", {"chars": len(res.content), "agent": actor})
         metric = {
             "phase": key, "model": res.model,
             "input_tokens": res.input_tokens, "output_tokens": res.output_tokens,
@@ -206,23 +199,17 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
         }
         return metric, res.content
 
-    def open_gate(run_id, gate_key, role):
-        reporter.phase(run_id, gate_key, state="active", status="Ready for review")
-        reporter.run(run_id, status="awaiting_gate", gate=role)
-
     # --- fetch node: clone the real repo (if one was given) ---------------
     def fetch(state):
         repo = state.get("repo", "")
         if not is_git_url(repo):
             return {}  # plain label / no repo -> demo mode, nothing to clone
-        reporter.run(state["run_id"], status="running")
         try:
             info = fetch_repo(state["run_id"], repo, state.get("branch") or None, os.getenv("GIT_TOKEN"))
         except Exception as e:
-            reporter.audit(state["run_id"], "repo.fetch_failed", "system", {"error": str(e)[:200]})
+            reporter.audit(state["run_id"], "repo.fetch_failed", {"error": str(e)[:200]})
             return {}
-        reporter.audit(state["run_id"], "repo.fetched", "system",
-                       {"commit": info["commit"], "files": info["count"]})
+        reporter.audit(state["run_id"], "repo.fetched", {"commit": info["commit"], "files": info["count"]})
         return {"workspace": info["path"], "repo_files": info["files"], "commit": info["commit"]}
 
     # --- context node: scan + rank relevant files -------------------------
@@ -236,7 +223,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
         selected = [r["path"] for r in ctx["relevant_files"]]
         reporter.event(run_id, "repo.context.generated", {"files": len(selected)})
         # audit: paths + method only, NO source, NO secrets
-        reporter.audit(run_id, "repo.context.generated", "system", {
+        reporter.audit(run_id, "repo.context.generated", {
             "commit_sha": ctx["repository"]["commit_sha"],
             "selected_files": selected,
             "retrieval_method": ctx["retrieval_method"],
@@ -252,25 +239,22 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
         return {"repository_context": ctx}
 
     # --- agent nodes ------------------------------------------------------
+    # Each agent node hands its work to the backend with a robot action; the
+    # backend stores it and opens the next gate only if the move is allowed.
     def requirements(state):
-        reporter.run(state["run_id"], status="running")
-        m, content = run_phase(state, "req", "requirements", "req-agent", "approved")
-        reporter.artifacts(state["run_id"], requirements=content)
-        open_gate(state["run_id"], "g1", "Planner")
+        m, content = run_phase(state, "req", "requirements", "req-agent")
+        reporter.action(state["run_id"], "submit_requirements", artifacts={"requirements": content})
         return {"requirements": content, "metrics": [m]}
 
     def design(state):
-        reporter.run(state["run_id"], status="running")
-        m, content = run_phase(state, "design", "design", "design-agent", "approved")
+        m, content = run_phase(state, "design", "design", "design-agent")
         design_obj = _build_design(state.get("brief", ""), state.get("repository_context"))
-        reporter.artifacts(state["run_id"], design=design_obj)
-        open_gate(state["run_id"], "g2", "Engineer")
+        reporter.action(state["run_id"], "submit_design", artifacts={"design": design_obj})
         return {"design": design_obj, "metrics": [m]}
 
     def coding(state):
-        reporter.run(state["run_id"], status="running")
-        # code phase stays 'active' — it is itself the final Engineer gate.
-        m, content = run_phase(state, "code", "coding", "code-agent", "active")
+        m, content = run_phase(state, "code", "coding", "code-agent")
+        review = None  # files / diff / summary handed over with "request review"
 
         # Execute tests in the isolated sandbox and report the real result.
         if runner is not None:
@@ -319,7 +303,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                                 system=SYSTEM_PROMPTS.get("coding")
                             )
                         except Exception as e:
-                            reporter.audit(state["run_id"], "code.chat_error", "code-agent", {"error": str(e)[:200]})
+                            reporter.audit(state["run_id"], "pipeline.chat_error", {"error": str(e)[:200]})
                             break
 
                         m["input_tokens"] += chat_res.input_tokens
@@ -358,8 +342,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
 
                             reporter.audit(
                                 state["run_id"],
-                                f"tool.{fn_name}",
-                                "code-agent",
+                                f"pipeline.tool.{fn_name}",
                                 {"args": fn_args, "status": "ok" if not res_str.startswith("Error") else "error"}
                             )
                             contents.append({
@@ -383,9 +366,9 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                     tools.write_file(test, test_src)
                     created_files.update([mod, test])
                     target_test = test
-                    reporter.audit(state["run_id"], "workspace.modified", "code-agent", {"created": [mod, test]})
+                    reporter.audit(state["run_id"], "workspace.modified", {"created": [mod, test]})
                 else:
-                    reporter.audit(state["run_id"], "workspace.modified", "code-agent", {
+                    reporter.audit(state["run_id"], "workspace.modified", {
                         "created": list(created_files),
                         "modified": list(modified_files),
                     })
@@ -447,8 +430,8 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 iterations=res["iterations"], duration_ms=res["duration_ms"],
                 output=res.get("output", ""),
             )
-            reporter.artifacts(
-                state["run_id"], files=files, diff=diff,
+            review = dict(
+                files=files, diff=diff,
                 summary={
                     "headline": "Ready for your review",
                     "sub": sub,
@@ -460,63 +443,29 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 },
             )
             reporter.audit(
-                state["run_id"], "sandbox.tested", "code-agent",
+                state["run_id"], "sandbox.tested",
                 {"passed": res["passed"], "failed": res["failed"], "iterations": res["iterations"]},
             )
 
-        reporter.run(state["run_id"], status="awaiting_gate", gate="Engineer")
+        # Code -> Gate 3: a human Engineer reviews (B3).
+        reporter.action(state["run_id"], "request_review", artifacts=review)
         return {"code": content, "metrics": [m]}
 
     # --- gate nodes (interrupt only, then route) --------------------------
-    def gate(gate_key, role, on_approve):
+    # The backend has already recorded the human decision and moved the run
+    # (state machine, one audit entry). A gate node only waits for that
+    # decision and routes the graph to match: approve goes on, reject goes
+    # back to the step the backend sent the work to, cancel ends.
+    def gate(gate_key, role):
         def node(state):
             payload = interrupt({"gate": gate_key, "role": role})
-            decision, feedback, actor = _read_decision(payload, role)
-
+            decision, feedback, target = _read_decision(payload)
+            if decision == "cancel":
+                return {"status": "cancelled"}
             if decision == "reject":
-                reporter.audit(state["run_id"], f"{gate_key}.rejected", actor, {"feedback": feedback} if feedback else {})
-                if feedback:
-                    reporter.phase(state["run_id"], gate_key, state="rejected", status="Rework Requested", at=now_label())
-                    reporter.run(state["run_id"], status="running", gate=None)
-                    return {"status": "rework", "feedback": feedback}
-                reporter.phase(state["run_id"], gate_key, state="rejected", status="Rejected", at=now_label())
-                reporter.run(state["run_id"], status="rejected", gate=None)
-                return {"status": "rejected"}
-            on_approve(state, actor)
-            return {"status": "running", "feedback": None}
+                return {"status": "rework", "feedback": feedback, "target": target}
+            return {"status": "approved" if gate_key == "g3" else "running", "feedback": None, "target": ""}
         return node
-
-    def approve_g1(state, actor):
-        reporter.phase(state["run_id"], "g1", state="approved", status="Approved", at=now_label())
-        reporter.audit(state["run_id"], "g1.approved", actor)
-        reporter.run(state["run_id"], status="running", gate=None)
-
-    def approve_g2(state, actor):
-        reporter.phase(state["run_id"], "g2", state="approved", status="Approved", at=now_label())
-        reporter.audit(state["run_id"], "g2.approved", actor)
-        reporter.run(state["run_id"], status="running", gate=None)
-
-    def approve_final(state, actor):
-        reporter.phase(state["run_id"], "code", state="approved", status="Approved", at=now_label())
-        reporter.phase(state["run_id"], "out", state="approved", status="Complete", at=now_label())
-        reporter.audit(state["run_id"], "code.approved", actor)
-        reporter.run(state["run_id"], status="approved", gate=None)
-
-    def final_gate(state):
-        payload = interrupt({"gate": "code", "role": "Engineer"})
-        decision, feedback, actor = _read_decision(payload, "Engineer")
-
-        if decision == "reject":
-            reporter.audit(state["run_id"], "code.rejected", actor, {"feedback": feedback} if feedback else {})
-            if feedback:
-                reporter.phase(state["run_id"], "code", state="rejected", status="Rework Requested", at=now_label())
-                reporter.run(state["run_id"], status="running", gate=None)
-                return {"status": "rework", "feedback": feedback}
-            reporter.phase(state["run_id"], "code", state="rejected", status="Rejected", at=now_label())
-            reporter.run(state["run_id"], status="rejected", gate=None)
-            return {"status": "rejected"}
-        approve_final(state, actor)
-        return {"status": "approved", "feedback": None}
 
     def route_g1(state):
         status = state.get("status")
@@ -535,20 +484,19 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
         return "end"
 
     def route_g3(state):
-        status = state.get("status")
-        if status == "rework":
-            return "coding"
+        if state.get("status") == "rework":
+            return "design" if state.get("target") == "design" else "coding"
         return "end"
 
     g = StateGraph(RunState)
     g.add_node("fetch", fetch)
     g.add_node("context", context)
     g.add_node("requirements", requirements)
-    g.add_node("gate1", gate("g1", "Planner", approve_g1))
+    g.add_node("gate1", gate("g1", "Planner"))
     g.add_node("design", design)
-    g.add_node("gate2", gate("g2", "Engineer", approve_g2))
+    g.add_node("gate2", gate("g2", "Engineer"))
     g.add_node("coding", coding)
-    g.add_node("gate3", final_gate)
+    g.add_node("gate3", gate("g3", "Engineer"))
 
     g.add_edge(START, "fetch")
     g.add_edge("fetch", "context")
@@ -558,7 +506,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
     g.add_edge("design", "gate2")
     g.add_conditional_edges("gate2", route_g2, {"design": "design", "coding": "coding", "end": END})
     g.add_edge("coding", "gate3")
-    g.add_conditional_edges("gate3", route_g3, {"coding": "coding", "end": END})
+    g.add_conditional_edges("gate3", route_g3, {"coding": "coding", "design": "design", "end": END})
 
     return g.compile(checkpointer=checkpointer or MemorySaver())
 
@@ -590,12 +538,12 @@ def start_run(app, run_id: str, brief: str, repo: str = "", branch: str = "") ->
     ))
 
 
-def _read_decision(payload, role: str) -> tuple[str, str, str]:
-    """(decision, feedback, actor) from a resume payload. The actor is the
-    reviewer the backend authenticated; without one, the gate's role is used."""
+def _read_decision(payload) -> tuple[str, str, str]:
+    """(decision, feedback, target) from a resume payload. target is where the
+    backend sent the run (Gate 3 rejects: "code" or "design")."""
     if isinstance(payload, dict):
-        return payload.get("decision", "approve"), payload.get("feedback", ""), payload.get("actor") or role
-    return str(payload), "", role
+        return payload.get("decision", ""), payload.get("feedback", ""), payload.get("target", "")
+    return str(payload), "", ""
 
 
 # One lock per run, so checking the paused gate and resuming it happen as one
@@ -610,7 +558,7 @@ def _run_lock(run_id: str) -> threading.Lock:
 
 
 def _pending_gate(snap) -> str | None:
-    """The gate key (g1 / g2 / code) the run is paused at, if any."""
+    """The gate key (g1 / g2 / g3) the run is paused at, if any."""
     for task in snap.tasks:
         for intr in getattr(task, "interrupts", None) or ():
             value = getattr(intr, "value", None)
@@ -619,15 +567,17 @@ def _pending_gate(snap) -> str | None:
     return None
 
 
-def resume_run(app, run_id: str, decision: str | dict, feedback: str = "", *,
-               gate: str | None = None, actor: str = "") -> dict:
-    """Resume a paused gate.
+def resume_run(app, run_id: str, decision: str, feedback: str = "", *,
+               gate: str | None = None, target: str = "") -> dict:
+    """Continue a paused gate after the backend recorded the human decision.
 
-    gate:  the gate the reviewer decided. If the run is paused somewhere else
-           (an earlier decision already moved it on), nothing is resumed and
-           reason is "stale_gate", so a repeated Approve cannot land on the
-           next gate.
-    actor: the reviewer, as authenticated by the backend, for the audit log.
+    decision: "approve", "reject" or "cancel".
+    gate:     the gate that was decided. If the run is paused somewhere else
+              (an earlier decision already moved it on), nothing is resumed and
+              reason is "stale_gate", so a repeated Approve cannot land on the
+              next gate.
+    target:   where the backend sent the run (for a Gate 3 reject: "code" or
+              "design").
     """
     with _run_lock(run_id):
         # Guard: if this run was never started here (no checkpoint), don't crash by
@@ -642,8 +592,5 @@ def resume_run(app, run_id: str, decision: str | dict, feedback: str = "", *,
         pending = _pending_gate(snap)
         if gate and pending != gate:
             return {"resumed": False, "reason": "stale_gate", "gate": pending}
-        if feedback or actor or isinstance(decision, dict):
-            payload = {"decision": decision, "feedback": feedback, "actor": actor}
-        else:
-            payload = decision
+        payload = {"decision": decision, "feedback": feedback, "target": target}
         return {"resumed": True, **summarize(app.invoke(Command(resume=payload), cfg(run_id)))}
