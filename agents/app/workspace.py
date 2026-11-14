@@ -59,14 +59,14 @@ def _git_env(url: str, token: str | None) -> dict[str, str]:
 
 
 def fetch_repo(run_id: str, repo: str, branch: str | None = None,
-               token: str | None = None, timeout: int = 120) -> dict | None:
-    """Clone repo (shallow) into workspaces/<run_id>. Returns
-    {path, commit, files, count} or None if `repo` is not a real repo ref.
+               token: str | None = None, timeout: int = 120, root: Path | None = None) -> dict | None:
+    """Clone repo (shallow) into <root>/<run_id> (root defaults to WORKSPACES).
+    Returns {path, commit, files, count} or None if `repo` is not a real repo ref.
     Raises subprocess.CalledProcessError / TimeoutExpired on clone failure."""
     if not is_git_url(repo):
         return None
 
-    dest = WORKSPACES / validate_run_id(run_id)
+    dest = Path(root or WORKSPACES) / validate_run_id(run_id)
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +89,24 @@ def fetch_repo(run_id: str, repo: str, branch: str | None = None,
     ).stdout.splitlines()
 
     return {"path": str(dest), "commit": commit, "files": files, "count": len(files)}
+
+
+def init_workspace(path: str | Path) -> str:
+    """An empty git repository for a run with no repo (demo mode), so the
+    coding step works on a real workspace with a real diff, like any run.
+    An existing repository is left as it is."""
+    dest = Path(path)
+    if (dest / ".git").is_dir():
+        return str(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(dest), *args], capture_output=True, text=True, check=True, timeout=30)
+
+    git("init", "-q")
+    git("-c", "user.name=GateKeep", "-c", "user.email=gatekeep@localhost",
+        "commit", "-q", "--allow-empty", "-m", "empty workspace")
+    return str(dest)
 
 
 def read_file(workspace: str, rel_path: str, max_lines: int = 60) -> list[str]:

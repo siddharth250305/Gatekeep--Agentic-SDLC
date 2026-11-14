@@ -40,6 +40,9 @@ from .repository.security import is_sensitive_path, redact_secrets, resolve_insi
 IMAGE = os.getenv("SANDBOX_IMAGE", "gatekeep-sandbox")
 
 # pytest exit code for "no tests were collected".
+# Container limits, used in the docker command and reported with each test run.
+MEMORY_MB = 512
+CPUS = "1"
 _PYTEST_NO_TESTS = 5
 # docker run exit codes for "the container never started" (daemon error,
 # command not invokable, command not found).
@@ -218,6 +221,11 @@ class SandboxRunner:
         self.image = image
         self.timeout = timeout
 
+    def profile(self) -> dict[str, str]:
+        """The isolation each test run gets, as shown on the dashboard."""
+        return {"image": self.image, "network": "Disabled", "memory": f"{MEMORY_MB} MB",
+                "cpu": f"{CPUS} core", "timeout": f"{self.timeout} seconds"}
+
     def run(self, files: dict[str, str]) -> dict:
         d = tempfile.mkdtemp(prefix="gk-files-")
         try:
@@ -299,7 +307,7 @@ class SandboxRunner:
         args = [
             "docker", "run", "--rm", "--name", name,
             "--network", "none",
-            "--memory", "512m", "--memory-swap", "512m", "--cpus", "1", "--pids-limit", "128",
+            "--memory", f"{MEMORY_MB}m", "--memory-swap", f"{MEMORY_MB}m", "--cpus", CPUS, "--pids-limit", "128",
             "--read-only", "--tmpfs", "/tmp:rw,size=64m",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
@@ -343,6 +351,15 @@ class FakeRunner:
         return {"passed": 1, "failed": 0, "skipped": 0, "total": 1, "exit_code": 0,
                 "timed_out": False, "status": "Passed", "duration_ms": 5, "output": "fake",
                 "cases": [], "missing_existing": []}
+
+
+def sandbox_profile(runner: object) -> dict[str, str]:
+    """The runner's isolation profile, or nothing for a runner without one."""
+    profile = getattr(runner, "profile", None)
+    if not callable(profile):
+        return {}
+    values = profile()
+    return {str(k): str(v) for k, v in values.items()} if isinstance(values, dict) else {}
 
 
 def docker_available(image: str = IMAGE) -> bool:

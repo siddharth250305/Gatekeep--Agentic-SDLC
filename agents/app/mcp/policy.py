@@ -1,6 +1,7 @@
 """Phase-aware policy engine for the GateKeep MCP server.
 
-Every MCP tool call passes through this engine before execution.
+Every tool call, from an MCP client or from the built-in pipeline, passes
+through this engine (GateKeepTools.call) before execution.
 It enforces:
   1. Tool → phase restrictions (e.g., coding tools only in 'code' phase)
   2. File path restrictions (same globs as repository/security.py)
@@ -74,6 +75,15 @@ class PolicyEngine:
         "request_approval":  ["code", "g3"],
     }
 
+    # Read-only status tools that also answer on a finished or cancelled run.
+    ANYTIME_TOOLS = frozenset({
+        "get_run", "get_agent_context", "get_approval_status", "get_audit_log", "report_model", "list_runs",
+    })
+
+    # Tools that touch one file, and whether they write it. Their "path"
+    # argument is checked against the file rules.
+    FILE_TOOLS = {"read_file": False, "write_file": True, "apply_patch": True}
+
     def check_tool(self, phase: str, tool_name: str) -> PolicyResult:
         """Check whether *tool_name* is permitted in the given *phase*."""
         if phase not in self.VALID_PHASES:
@@ -128,6 +138,34 @@ class PolicyEngine:
             return PolicyResult(False, f"Cannot {action} '{path}' — blocked by security policy")
 
         return PolicyResult(True, "OK")
+
+    def evaluate(self, run: dict[str, Any], tool_name: str, path: str | None = None,
+                 write: bool = False) -> dict[str, Any] | None:
+        """The whole policy decision for one tool call on *run*.
+
+        Returns None when the call may go ahead, or a denial (``error`` plus
+        what was refused) that the caller returns and records. Unknown tools
+        and runs with no active step are refused (fail closed)."""
+        if tool_name not in self.TOOL_PERMISSIONS:
+            return {"error": f"Unknown tool '{tool_name}'", "tool": tool_name}
+        if tool_name in self.ANYTIME_TOOLS:
+            return None
+        phase = self.current_phase(run)
+        if phase is None:
+            return {
+                "error": "This run has no active phase (it is finished or cancelled), "
+                         "so no tool can act on it.",
+                "status": run.get("status"),
+                "tool": tool_name,
+            }
+        result = self.check_tool(phase, tool_name)
+        if not result.allowed:
+            return {"error": result.reason, "phase": phase, "tool": tool_name}
+        if path is not None:
+            result = self.check_file_access(path, write=write)
+            if not result.allowed:
+                return {"error": result.reason, "path": path, "tool": tool_name}
+        return None
 
     def get_phase_permissions(self, phase: str) -> dict[str, list[str]]:
         """Return allowed and denied tools for the specified pipeline phase."""
