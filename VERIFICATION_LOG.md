@@ -390,3 +390,139 @@ The second one is the same false claim on another tab, so it was fixed too (only
 Test: `src/App.test.jsx::the dashboard says SHA-256, never HMAC, until the chain really is HMAC-signed (E1)` opens the Overview and the Audit Chain tab and checks the new text and that `HMAC` appears nowhere. RED first: it failed before the change (the text was not found). While going GREEN the test also needed a fix of its own (the nav has two buttons with the same title, desktop and mobile, so the selector was ambiguous); the code was not touched for that.
 
 Re-run: `npm test` 14/14 passed, `npm run build` built cleanly. Only dashboard label text and one test changed, so the Python and backend suites were not re-run; their results above stand.
+
+---
+
+## Milestone 3: Trustworthy Evidence
+
+**Status:** Completed and verified (including the live browser check)
+**Branch:** `fix/milestone-3-trustworthy-evidence`
+
+### Dependency gate
+
+| Item | Needs | Prerequisite state |
+|---|---|---|
+| C2 | C1 | `[x]` Milestone 0, verified (`tests/test_sandbox.py::test_verdict[*]`) |
+| C3 | C2 | built first in this milestone |
+| B6 | B3 | `[x]` Milestone 2, verified (Gate 3 state machine) |
+| B7 | B3, B6, C2 | all three done before B7 |
+| D2, D3 | D5 | `[x]` Milestone 1, verified (one block list) |
+| D8 | D3, D5 | both done before D8 |
+| E4 | none | |
+| E1 | E4 | built together, same stamp format |
+
+### Items summary
+
+| ID | Problem fixed | Test name(s) verifying the fix | Status |
+|---|---|---|---|
+| **C2** | Counts come from pytest's JUnit XML report on a separate `/results` mount, never from printed text. Each test's name, file and outcome is saved as a backend **test run**. A missing, broken, oversized, DOCTYPE-bearing or non-regular-file report never passes. | `tests/test_sandbox.py::test_printing_999_passed_does_not_change_the_count`, `::test_a_missing_junit_report_is_never_a_pass`, `::test_each_test_name_and_result_is_saved`, `::test_a_huge_or_broken_junit_report_is_not_trusted`, `::test_a_report_that_is_not_a_regular_file_is_not_read[symlink,fifo]`, `::test_a_report_with_a_doctype_is_not_trusted`, `::test_real_sandbox_ignores_printed_counts_and_hides_secrets` (real Docker); `backend/test/evidence.test.js::C2: a test run must be well formed`, `::C2 + C3: the run shows the latest test run with every test, marked new or existing`; `backend/test/runs.test.js::tests + sandbox surface on the run; results come only from a recorded test run (C2)`; `src/App.test.jsx::the test results page lists every test, marked new or existing (C2, C3)` | Verified |
+| **C3** | The whole suite always runs (`target` no longer narrows). Each test is marked new or existing against git `HEAD`. An existing test that did not run, or is now skipped when it was not written to skip at `HEAD`, fails the run. Unreadable git history fails the run. | `tests/test_sandbox.py::test_the_robot_cannot_narrow_the_run_to_one_target`, `::test_new_and_existing_tests_are_marked`, `::test_deleting_an_existing_test_fails_the_run`, `::test_skipping_an_existing_test_counts_as_not_running_it`, `::test_an_existing_test_that_was_already_skipped_may_stay_skipped`, `::test_a_broken_git_history_fails_the_run_instead_of_marking_everything_new`, `::test_a_repo_with_no_commits_has_no_baseline`; `tests/test_mcp_tools_backend.py::test_run_tests_always_runs_the_whole_suite` | Verified |
+| **B6** | `request_approval` freezes the workspace (a marker outside it) before the move to Gate 3. `write_file` / `apply_patch` are refused and audited while frozen. The freeze lifts only when the backend says the run is back at Code. A per-run lock stops writes racing the hand-over. An unclear failure keeps the freeze. The backend refuses new test runs outside Code. | `tests/test_mcp_tools_backend.py::test_writes_after_request_review_are_refused`, `::test_the_freeze_holds_even_if_the_backend_answer_is_stale`, `::test_the_freeze_lifts_when_gate_3_sends_the_work_back_to_code`, `::test_a_refused_review_request_does_not_freeze_the_workspace`, `::test_an_ambiguous_review_failure_keeps_the_freeze_if_the_run_reached_gate_3`; `tests/test_agent_context.py::test_pipeline_hands_over_the_tested_fingerprint_and_freezes_the_workspace`; `backend/test/evidence.test.js::B6 (server side): test runs can only be recorded while the run is at Code` | Verified |
+| **B7** | Tree fingerprint (`agents/app/fingerprint.py`). Each test run is stored with its fingerprint. `request_review` must carry a fingerprint. Gate 3 approve requires the latest test run to have that fingerprint and `Passed`, with counts that agree (`reviewEvidence`, one rule shared by the run view and approve). The approval's audit entry records `{fingerprint, testRun}`. The dashboard disables Approve with the reason. | `backend/test/evidence.test.js::B7: *` (7 tests), `::HTTP: test runs are agent-only, result fields cannot be faked through PUT /tests, approve refusal says why`; `tests/test_mcp_tools_backend.py::test_run_tests_records_a_test_run_bound_to_the_code_fingerprint`, `::test_request_approval_sends_the_code_fingerprint`, `::test_the_fingerprint_changes_when_any_file_changes`; `src/App.test.jsx::at Gate 3, Approve is disabled with the reason when the code changed after the last test run (B7)`, `::at Gate 3 with no review evidence at all, Approve stays disabled (fail closed)` | Verified |
+| **D2** | `resolve_inside()` follows every symlink and refuses a real path that leaves the workspace, lies in `.git`, or is a sensitive file. Used by read, write, patch, search, file list, scanner, retriever, context and the sandbox copy. | `tests/test_repository.py::test_reading_through_a_bad_shortcut_is_refused[*]`, `::test_writing_through_a_bad_shortcut_is_refused[*]`, `::test_a_harmless_shortcut_inside_the_workspace_still_works`, `::test_search_list_and_context_never_follow_bad_shortcuts`, `::test_the_retriever_does_not_read_through_bad_shortcuts` | Verified |
+| **D3** | Secrets become `***` in file reads, search (matched on the redacted text, so it cannot confirm a value), `workspace_diff`, repository context and test output. Covered: whole private-key blocks (also with no END line), unquoted `.env`/YAML values, upper-case `KEY=value` anywhere, JSON, Stripe/AI keys, `user:pass@` URLs, Basic auth. Key names are length-capped, so a 100k-character line takes milliseconds. | `tests/test_repository.py::test_a_whole_private_key_block_is_hidden`, `::test_a_private_key_with_no_end_line_is_hidden_to_the_end`, `::test_unquoted_and_json_secrets_are_hidden[*]` (6), `::test_ordinary_code_about_passwords_is_left_alone[*]` (4), `::test_vendor_keys_and_url_credentials_are_hidden[*]` (5), `::test_search_results_are_redacted_and_cannot_find_secret_values`, `::test_workspace_diff_is_redacted`, `::test_redaction_stays_fast_on_huge_lines`; `tests/test_sandbox.py::test_secrets_in_test_output_are_redacted`; `tests/test_mcp_tools_backend.py::test_get_diff_hides_secrets` | Verified |
+| **D8** | Tests run on a copy of the workspace without secret files and folders (`.env`, keys, `.ssh/`, `.git/`, ...) or unsafe shortcuts. The real workspace is untouched. | `tests/test_sandbox.py::test_secret_files_are_stripped_from_the_sandbox_copy`, `::test_the_sandbox_copy_and_the_fingerprint_cover_the_same_files`, `::test_real_sandbox_ignores_printed_counts_and_hides_secrets` (real Docker: `test_env_is_not_in_the_sandbox` passed) | Verified |
+| **E4** | `run_id` is inside every stamp. `audit_heads` holds the latest seq and stamp with its own HMAC. Verify reports `truncated`, `head_mismatch` or `head_missing`. An append refuses a head whose seal is invalid or missing, or that doesn't match the last entry, instead of re-sealing it. An existing run's wiped diary cannot restart. | `backend/test/audit-hmac.test.js::E4: *` (9 tests); `backend/test/chain.test.js::computeHash covers the run id...`, `::verifyChain refuses a chain with no head, and one that stops short of its head` | Verified |
+| **E1** | Stamps are HMAC-SHA256 with `GATEKEEP_AUDIT_KEY` (env, ≥32 chars). No key means the backend refuses to start and nothing can be stamped. The dashboard says **SHA-256 HMAC** again. | `backend/test/audit-hmac.test.js::E1: the stamp is keyed...`, `::E1: no key, or a short key, refuses to stamp (fail closed)`, `::E1: editing a row and recomputing every plain SHA-256 stamp is detected`; `src/App.test.jsx::the dashboard says SHA-256 HMAC now that the chain is HMAC-signed (E1)` | Verified |
+
+### Test-first evidence (T1)
+
+Every new test was run and failed for the intended reason before the code changed. The user asked to see this report before any commit, so RED/GREEN evidence is kept here rather than in checkpoint commits.
+
+| Area | RED (before the fix) | GREEN (after) |
+|---|---|---|
+| Sandbox C2/C3/D8/D3 | 10 failed: "no /results mount", `assert 5 == 0` (printed "5 passed" trusted), `KeyError: 'cases'` | 26/26 sandbox tests |
+| Repository D2/D3 | 14 failed: read/write through `config.py -> .env` allowed, key bodies, unquoted values, search, diff not redacted. (Shortcuts *outside* the workspace were already refused by the old containment check.) | 64/64 |
+| MCP B6/B7/C3 | Compile-time RED (`app.fingerprint` missing). Then, against a stub that raised `NotImplementedError`, 8 failed. Two guard tests (freeze lifts / refused request leaves it writable) cannot fail before a freeze exists. | 37/37 |
+| Pipeline B6/B7 | `KeyError: 'fingerprint'` | passes |
+| Backend B7 | Compile-time RED (`recordTestRun` missing). Then, against a stub, 11 failed. | 11/11 |
+| Backend E4/E1 | Compile-time RED (`auditKey` missing). Then, against a stub, 9 failed. | 9/9 |
+| Dashboard | 4 failed (label, Approve not blocked, no test list) | 17/17 |
+| Review fixes | Python: 11 failed. The 100k-line redaction and the FIFO report each hung past 120 s and were stopped. Backend: 5 failed (rollback re-sealed, unsealed head accepted, tail mismatch accepted, wiped diary restarted, inconsistent "Passed" accepted). | all green |
+
+Test-harness corrections made while going GREEN (the code was not changed for these):
+- The fake `docker run` also swallowed the `git` calls of the code under test. It now passes them to the real `subprocess.run`.
+- The pipeline test expected the workspace to stay thawed after a Gate 3 rework. The pipeline actually re-tests and hands over again, so it is frozen again. The test now checks the second test run and the second hand-over.
+- The Approve selectors matched two buttons (header and Overview card). The tests now check both.
+
+### "Done when" acceptance verification
+
+All 7 are proven by automated tests and by the live run below (real backend, real Docker, real MCP tools).
+
+| # | Criterion | Automated proof | Live proof |
+|---|---|---|---|
+| 1 | A test printing `999 passed` does not change the count | `test_printing_999_passed_does_not_change_the_count`, `test_real_sandbox_ignores_printed_counts_and_hides_secrets` (real Docker: 1 passed, 1 failed, while the output said `999 passed` twice) | `PASS 1. ... [passed=2 failed=1 total=3]` |
+| 2 | A test reading `.env` finds none, and printed secrets show `***` | `test_secret_files_are_stripped_from_the_sandbox_copy`, `test_secrets_in_test_output_are_redacted`, real-Docker test above | `PASS 2a`, `PASS 2b` (`API_KEY=***`) |
+| 3 | Reading or writing through a shortcut to `.env` or outside the workspace is refused in every tool | D2 tests above | `PASS 3a`–`3d` (read, write, outside, search/list/context) |
+| 4 | Writing after `request_review` is refused at Gate 3 | B6 tests above | `PASS 4a` write, `4b` patch, `4c` MCP phase policy |
+| 5 | Gate 3 approve refused/disabled when the code hash does not match the latest passing test run | B7 backend + dashboard tests | `PASS 5a` (`reason: code_changed`), `5b` (HTTP 409 "the code changed after the last test run"), `5c` |
+| 6 | Editing a row and recomputing plain SHA-256 is detected | `E1: editing a row and recomputing every plain SHA-256 stamp is detected` | `PASS 6` (direct SQL on the live DB: `hash_mismatch` at #2) |
+| 7 | Deleting the last entry is detected | `E4: deleting the last entry is detected` and 8 more E4 tests | `PASS 7` (`truncated`), `7b` head moved back (`head_mismatch`), `7c` head deleted (`head_missing`), `7d` append then refused |
+
+### Review findings (ECC code-reviewer and ECC security-reviewer)
+
+Code reviewer: 0 critical, 2 high, 3 medium, 3 low. Security reviewer: 0 critical, 4 high, 6 medium, 3 low. Several findings overlap.
+
+| # | Finding | Result |
+|---|---|---|
+| CR1 / SR1 (HIGH) | Redaction regex is quadratic: a 20k-character line took ~10 s, and the robot could plant one to hang the MCP server (worst inside the per-run lock at `request_approval`) | **Fixed.** Key prefixes anchored and capped at 64 characters. 100k characters now take milliseconds. Test: `test_redaction_stays_fast_on_huge_lines` (RED: did not finish in 120 s). |
+| CR2 (HIGH) | `lockHead` re-sealed a rolled-back head on the next append, laundering a truncation. A head with a NULL seal was also accepted. | **Fixed.** `checkedHead` refuses a head whose seal is invalid or missing, or that doesn't match the last entry. 3 tests. |
+| SR3 (HIGH) | The review diff hid gitignored files and paths like `evil__pycache__/`, but the sandbox ran them (for example a hidden `conftest.py`) | **Fixed.** The diff now lists every untracked file, ignored ones included. The diff, the sandbox copy and the fingerprint share one exact-name skip list (`fingerprint.SKIP_DIRS`). Tests: `test_the_review_diff_shows_files_hidden_by_gitignore`, `test_the_sandbox_copy_and_the_fingerprint_cover_the_same_files`. |
+| SR4 (HIGH) | A DB attacker who saved an old sealed head can roll a run back to it | **Not fixed (known limit).** Needs an anchor outside the database. Documented in the README. |
+| CR3 / SR2 (MED) | An existing test marked skip/xfail counted as having run | **Fixed** (skipped existing tests count as not run unless written to skip at `HEAD`). An existing test *body* weakened to `assert True` is not detected automatically; it shows up in the reviewer's diff. Documented. |
+| CR4 / SR9 (MED) | Git failures made every test "new" (fail open), and a git timeout crashed the run | **Fixed.** Only "no `.git`" or "no commit yet" means no baseline; any other git failure fails the run with a message. |
+| CR5 / SR13 (MED) | Backend accepted `status: Passed` with failures, missing existing tests or counts that don't add up | **Fixed** in `validTestRun`. 6 more cases in the C2 validation test. |
+| SR5 (MED) | `junit.xml` as a symlink or FIFO could hang or fool the host; DOCTYPE entities | **Fixed.** Opened with `O_NOFOLLOW \| O_NONBLOCK`, must be a regular file, at most 5 MB is read, DOCTYPE/ENTITY rejected. 3 tests. |
+| SR6 (MED) | `/results` is a writable host folder with no size cap (tests could fill the disk until the timeout) | **Not fixed (leftover).** A container tmpfs cannot be read back after `--rm`. Bounded by the 30 s timeout. |
+| SR7 (MED) | Secrets in ordinary files can leave encoded through test output; some formats were not redacted | **Partly fixed.** Added Stripe, AI-API, URL-credential and Basic-auth patterns. Encoded output (reversed, hex) cannot be caught by patterns. Documented. Returning only counts to the robot would change the tool contract and is left for a later decision. |
+| SR8 (MED) | Wiping a run's diary and head let a fresh chain start | **Fixed.** A run that exists can only start its diary with `run.created`, and an existing run with an empty diary shows as broken. Test: `E4: wiping a run diary ...`. Deleting the whole run, row included, stays undetectable without an external registry (leftover). |
+| SR10 (MED) | `dev.sh` exported the audit key to the agent, MCP and Vite processes | **Fixed.** Those processes `unset GATEKEEP_AUDIT_KEY`. |
+| SR11 (LOW) | An unclear `request_approval` failure thawed the workspace even if the run reached Gate 3 | **Fixed.** The run is re-read and the freeze lifts only if it is certainly at Code. The pipeline keeps the freeze on failure. Test added. |
+| CR6 / SR12 (LOW) | The fingerprint and the sandbox copy used different skip rules (`*.pyc`) | **Fixed** (one shared rule, see SR3). |
+| CR7 (LOW) | The pipeline thaws without asking the backend | **Not changed.** The graph only re-enters the coding node after the backend has recorded a Gate 3 reject to Code (it resumes on `/resume` from `/decide`), so the rule holds. |
+| CR8 (LOW) | Migration impact | **Noted.** Runs from before this change show no test results. A run already at Gate 3 has no fingerprint, so it can only be sent back. Chains stamped with plain SHA-256 no longer verify. Reset dev data with `scripts/dev.sh reset`. All of this fails closed. |
+
+### Automated test suite totals (final, after the review fixes)
+
+| Test suite | Result | Details |
+|---|---|---|
+| **Python (`cd agents && .venv/bin/pytest -v`)** | **293 passed, 0 failed** | Includes 3 real Docker sandbox tests. Coverage not measured (`pytest-cov` not installed). |
+| **Node, in-memory (`cd backend && npm test`)** | **149 passed, 0 failed, 7 skipped** | The 7 skipped tests need real Postgres |
+| **Node, real Postgres (`npm run test:pg`, with `--experimental-test-coverage`)** | **156 passed, 0 failed** | All files: 96.71% lines / 89.45% branches. `audit/chain.js` 100% lines, `audit/service.js` 100% lines, `runs/service.js` 96.35% lines. |
+| **Dashboard (`npm test`, Vitest)** | **18 passed, 0 failed** (2 files) | Includes the browser-check fix below |
+| **Frontend build (`npm run build`)** | **Built cleanly** | 1,905 modules, rebuilt after the browser-check fix |
+
+### Live checks
+
+A real backend on a throwaway Postgres database (`gatekeep_m3_live`) with its own audit key, a real agent token and logins (Planner, two Engineers):
+
+- **Fail closed at startup:** without `GATEKEEP_AUDIT_KEY` the backend exited with code 1 and a clear message.
+- **MCP + Docker run: 21/21 checks passed.** The real `GateKeepTools` drove a real git workspace holding `.env`, a shortcut to it, and an existing test, using the real Docker sandbox. The robot's "evil" test printed `999 passed`, tried to open `.env` and printed a secret. Checks covered criteria 1–5, C2/C3, the rework loop, and a final approval recording the fingerprint and test run. Re-run after the review fixes, still 21/21.
+- **Database attacker run: 7/7 checks passed.** Direct SQL on the live database, then the API's own verify: criteria 6 and 7, head moved back, head deleted, and an append refused afterwards. Re-run after the review fixes, still 7/7.
+- **Browser check (ECC Chrome DevTools, real Chrome 157): passed.** Dashboard on Vite (`:5181`) against the live backend, signed in as `eli` (Engineer). On the first attempt DevTools could not start, because an old automation Chrome held its profile. Once the profile was free the check ran:
+
+| Check | Observed in the browser |
+|---|---|
+| Gate 3, code changed after the last passing test run (`RUN-M3-UI`) | Header "Approve Gate" and Overview "Approve Engineer" both **disabled** with the tooltip "The code changed after the last test run". The gate card says "The code changed after the last test run. Approve is disabled." Clicking was rejected (element not interactive), and no `/decide` request appeared in the network log. |
+| Code Review IDE at that gate | Both Approve buttons disabled with the same reason, plus the same note. "Request Changes" stays **enabled**. |
+| Gate 3 with no test run at all (`RUN-M3-UI2`) | Approve disabled: "No test run was recorded for this code. Approve is disabled." |
+| Test Results tab | "Tests in the last run · 1 existing · 1 new": `test_existing` marked **Existing**, `test_limit_429` marked **New**. Outcome "Passed, 2 passed · 0 failed · 2 total". Ledger card "HMAC-SHA256 chained". |
+| Overview ledger | "Ledger Algorithm: SHA-256 HMAC" (E1 label restored) |
+| Gate 3 rework loop | Request Rework → Code (default) → the run showed "REWORK REQUESTED" (`POST /decide` body `{"decision":"reject","gate":"g3","target":"code",...}`). The robot then recorded a passing test run on the current fingerprint and requested review through the API. The **open page switched live (WebSocket, no reload)** to Gate 3 with both Approve buttons enabled and the note gone. |
+| Approve the exact tested version | Clicked "Approve Engineer": the run went to **Done / Production Ready**, 9 verified blocks. The `g3.approved` diary entry carries `evidence: {fingerprint: bbbb…, testRun: 804af5f9…}`, matching the latest test run. |
+| Rework feedback text | With DevTools `fill` the typed text did not reach React state, so the default text was sent: a tool artifact. With real keystrokes (`type_text`) the diary recorded "Overall Guidance: Run the tests on this exact code first". The app is correct. |
+| Audit Chain tab, row edited + plain SHA-256 recomputed (`RUN-M3-A6`) | "Tamper Detected (#2)", "Cryptographic Integrity Failure Detected at Block #2", the HMAC explanation, stored vs recomputed stamp, and "Algorithm: HMAC-SHA256 chain, run-bound, head-sealed". Footer "Chain broken". |
+| Audit Chain tab, head deleted (`RUN-M3-A7`) | "The sealed chain head for this run was deleted, so missing entries could not otherwise be detected." |
+| Console | One 404 for `/favicon.ico` (no favicon in `public/`, harmless). No other errors or warnings. |
+
+**Bug found in the browser check and fixed:** for a deleted head (`brokenAt: null`) the Audit Chain tab still said "Tamper Detected (#2)" and "at Block #2". An old fallback in `AuditLogView.jsx` invented block 2 whenever a chain was broken without a block number (against rule 5, no fake data). It now shows a block number only when the server reports one. Test first: `src/App.test.jsx::a deleted chain head is explained without inventing a block number (E4)` failed (heading read "...at Block #2"), then passed. After the hot reload the browser showed "Tamper Detected" and "Cryptographic Integrity Failure Detected" with no number.
+
+### Known leftovers (not blocking)
+
+- Audit rollback to an old sealed head, and deleting a whole run, need an anchor or registry outside the database.
+- A `conftest.py` that attacks pytest itself can still forge its report. It is now always visible in the reviewer's diff, even if gitignored.
+- An existing test whose body is weakened is not flagged automatically, only shown in the diff.
+- `/results` has no disk cap beyond the 30 s timeout.
+- Encoded secrets in test output cannot be caught by pattern redaction.
+- Test runs (`test_runs` rows) are not covered by the audit chain, so a database attacker could forge one. The approve audit entry records which test run and fingerprint were used.
+- No Python lint run: `ruff` is not installed on this machine.
