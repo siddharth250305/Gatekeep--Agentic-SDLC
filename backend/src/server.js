@@ -5,6 +5,7 @@ import { pool, runSchema } from './db.js'
 import { seed } from './runs/seed.js'
 import { countUsers } from './auth/service.js'
 import { auditKey } from './audit/chain.js'
+import { recoverPipelineRuns } from './runs/pipeline.js'
 
 // The audit diary is stamped with an HMAC key kept outside the database (E1).
 // Without it nothing could be recorded, so refuse to start (fail closed).
@@ -41,4 +42,12 @@ hub.attach(server)
 const port = process.env.PORT || 4040
 server.listen(port, () => {
   console.log(`GateKeep API + WebSocket on http://localhost:${port}`)
+  // The pipeline keeps no run state: after a restart, wake it for every run
+  // it was working on, so none is left waiting at a robot step (G9).
+  recoverPipelineRuns(pool)
+    .then(({ woken, failed }) => {
+      if (woken.length) console.log(`woke the pipeline for ${woken.join(', ')}`)
+      if (failed.length) console.warn(`the pipeline did not accept ${failed.join(', ')} (not running, or refused); it picks them up when it starts`)
+    })
+    .catch((err) => console.warn(`pipeline recovery skipped: ${err.message}`))
 })
