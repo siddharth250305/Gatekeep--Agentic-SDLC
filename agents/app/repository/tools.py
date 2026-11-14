@@ -3,6 +3,7 @@ calls these - never raw shell. Every path is confined to the run workspace."""
 
 from __future__ import annotations
 
+import codecs
 import json
 from pathlib import Path
 
@@ -42,7 +43,7 @@ class WorkspaceTools:
         p = self._safe(path)
         if not p.is_file():
             return f"<not found: {path}>"
-        text = p.read_text(errors="replace")[:max_bytes]
+        text = p.read_text(encoding="utf-8", errors="replace")[:max_bytes]
         redacted, _ = redact_secrets(text)
         return redacted
 
@@ -53,7 +54,7 @@ class WorkspaceTools:
         out: list[dict] = []
         for f in scanner.scan(str(self.root)):
             try:
-                text = self._safe(f["path"]).read_text(errors="replace")
+                text = self._safe(f["path"]).read_text(encoding="utf-8", errors="replace")
             except (OSError, ValueError):
                 continue
             for i, line in enumerate(redact_secrets(text)[0].splitlines(), 1):
@@ -75,37 +76,63 @@ class WorkspaceTools:
     def write_file(self, path: str, content: str) -> dict:
         p = self._safe_writable(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-        return {"path": path, "bytes": len(content.encode())}
+        data = content.encode("utf-8")
+        p.write_bytes(data)  # exact bytes: no locale encoding, no newline translation
+        return {"path": path, "bytes": len(data)}
 
     def apply_patch(self, path: str, find: str, replace: str) -> dict:
         """Deterministic in-place edit: replace `find` with `replace`. Safer than
-        rewriting whole files. Returns applied=False if `find` is absent."""
+        rewriting whole files. Returns applied=False if `find` is absent.
+
+        The file keeps its encoding (UTF-8, with or without a byte order mark)
+        and its line endings: on a CRLF file the patch is matched and written
+        with CRLF (G7). A file that is not UTF-8 text is refused untouched, and
+        so is an empty search text, which would match anywhere."""
+        if not find.strip():
+            return {"path": path, "applied": False, "reason": "find is empty; give the exact text to replace"}
         p = self._safe_writable(path)
         if not p.is_file():
             return {"path": path, "applied": False, "reason": "file not found"}
-        text = p.read_text(errors="replace")
+        raw = p.read_bytes()
+        bom = raw.startswith(codecs.BOM_UTF8)
+        try:
+            text = raw[len(codecs.BOM_UTF8) if bom else 0:].decode("utf-8")
+        except UnicodeDecodeError:
+            return {"path": path, "applied": False,
+                    "reason": "not a UTF-8 text file; refused so it is not damaged (use write_file to replace it)"}
+
+        crlf = "\r\n" in text and "\n" not in text.replace("\r\n", "")
+        if crlf:
+            text = text.replace("\r\n", "\n")
+        find, replace = find.replace("\r\n", "\n"), replace.replace("\r\n", "\n")
+
+        result: dict = {"path": path, "applied": True}
         if find in text:
-            p.write_text(text.replace(find, replace, 1))
-            return {"path": path, "applied": True}
+            new_text = text.replace(find, replace, 1)
+        else:
+            new_text = _whitespace_tolerant(text, find, replace)
+            if new_text is None:
+                return {"path": path, "applied": False, "reason": "anchor not found"}
+            result["resilient"] = True
 
-        # Resilient fallback: whitespace-trimmed line matching
-        find_norm = "\n".join(ln.rstrip() for ln in find.strip().splitlines())
-        text_lines = text.splitlines()
-        text_norm = "\n".join(ln.rstrip() for ln in text_lines)
-        if find_norm and find_norm in text_norm:
-            idx = text_norm.find(find_norm)
-            prefix_lines = text_norm[:idx].count("\n")
-            target_line_count = find_norm.count("\n") + 1
-            new_lines = (
-                text_lines[:prefix_lines]
-                + replace.splitlines()
-                + text_lines[prefix_lines + target_line_count:]
-            )
-            p.write_text("\n".join(new_lines) + ("\n" if text.endswith("\n") else ""))
-            return {"path": path, "applied": True, "resilient": True}
+        if crlf:
+            new_text = new_text.replace("\n", "\r\n")
+        p.write_bytes((codecs.BOM_UTF8 if bom else b"") + new_text.encode("utf-8"))
+        return result
 
-        return {"path": path, "applied": False, "reason": "anchor not found"}
+
+def _whitespace_tolerant(text: str, find: str, replace: str) -> str | None:
+    """Fallback match that ignores trailing whitespace on each line. Works on
+    "\n" text; returns the patched text, or None when there is no match."""
+    find_norm = "\n".join(ln.rstrip() for ln in find.strip().splitlines())
+    text_lines = text.split("\n")
+    text_norm = "\n".join(ln.rstrip() for ln in text_lines)
+    if not find_norm or find_norm not in text_norm:
+        return None
+    prefix_lines = text_norm[:text_norm.find(find_norm)].count("\n")
+    target_line_count = find_norm.count("\n") + 1
+    return "\n".join(text_lines[:prefix_lines] + replace.splitlines()
+                     + text_lines[prefix_lines + target_line_count:])
 
 
 WORKSPACE_TOOLS_SCHEMA = [
