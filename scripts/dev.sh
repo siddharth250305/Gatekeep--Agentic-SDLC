@@ -27,6 +27,7 @@ case "$1" in
         echo "GATEKEEP_API_TOKEN=$TOKEN"
         echo "GATEKEEP_PIPELINE_SECRET=$(openssl rand -hex 32)"
         echo "GATEKEEP_MCP_TOKEN=$(openssl rand -hex 32)"
+        echo "GATEKEEP_AUDIT_KEY=$(openssl rand -hex 32)"
       } > "$ENVF"
     )
     echo "wrote $ENVF"
@@ -36,13 +37,19 @@ case "$1" in
     ;;
   start)
     if [ ! -f "$ENVF" ]; then echo "first run: scripts/dev.sh setup [username]"; exit 1; fi
+    # Setups made before the HMAC audit diary (E1) have no audit key yet.
+    if ! grep -q '^GATEKEEP_AUDIT_KEY=' "$ENVF"; then
+      echo "GATEKEEP_AUDIT_KEY=$(openssl rand -hex 32)" >> "$ENVF"
+      echo "added GATEKEEP_AUDIT_KEY to $ENVF (older audit entries will not verify; run 'dev.sh reset')"
+    fi
     set -a; . "$ENVF"; set +a
     $DC up -d db
     wait_for_db
     (cd "$ROOT/backend" && PIPELINE_URL=http://localhost:8077 GATEKEEP_DEMO_MODE=1 nohup node src/server.js > /tmp/gk-api.log 2>&1 & disown)
-    (cd "$ROOT/agents" && . .venv/bin/activate && CHECKPOINT_DB="$PG" GATEKEEP_API=http://localhost:4040 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
-    (cd "$ROOT/agents" && . .venv/bin/activate && GATEKEEP_API=http://localhost:4040 nohup python -m app.mcp.server --transport sse > /tmp/gk-mcp.log 2>&1 & disown)
-    (cd "$ROOT" && nohup npm run dev > /tmp/gk-fe.log 2>&1 & disown)
+    # Only the backend gets the audit key; the agent-facing services never see it.
+    (cd "$ROOT/agents" && . .venv/bin/activate && unset GATEKEEP_AUDIT_KEY && CHECKPOINT_DB="$PG" GATEKEEP_API=http://localhost:4040 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
+    (cd "$ROOT/agents" && . .venv/bin/activate && unset GATEKEEP_AUDIT_KEY && GATEKEEP_API=http://localhost:4040 nohup python -m app.mcp.server --transport sse > /tmp/gk-mcp.log 2>&1 & disown)
+    (cd "$ROOT" && unset GATEKEEP_AUDIT_KEY && nohup npm run dev > /tmp/gk-fe.log 2>&1 & disown)
     sleep 4
     echo "  UI:    http://localhost:5180"
     echo "  API:   http://localhost:4040  (logs: /tmp/gk-api.log)"
@@ -57,7 +64,8 @@ case "$1" in
     echo "stopped app services (Postgres container still running; use 'dev.sh db-stop' to stop it)"
     ;;
   reset)
-    $DC exec -T db psql -U gatekeep -c "TRUNCATE runs, audit_events, run_phases, test_results, run_artifacts RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi  # the seed stamps the diary with GATEKEEP_AUDIT_KEY
+    $DC exec -T db psql -U gatekeep -c "TRUNCATE runs, audit_events, audit_heads, run_phases, test_results, test_runs, run_artifacts RESTART IDENTITY CASCADE;" 2>/dev/null || true
     $DC exec -T db psql -U gatekeep -c "TRUNCATE checkpoints, checkpoint_blobs, checkpoint_writes;" 2>/dev/null || true
     (cd "$ROOT/backend" && npm run seed)
     echo "reset done: demo runs reseeded (refresh the UI)"

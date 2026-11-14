@@ -4,6 +4,17 @@ import { createRealtimeHub } from './realtime.js'
 import { pool, runSchema } from './db.js'
 import { seed } from './runs/seed.js'
 import { countUsers } from './auth/service.js'
+import { auditKey } from './audit/chain.js'
+
+// The audit diary is stamped with an HMAC key kept outside the database (E1).
+// Without it nothing could be recorded, so refuse to start (fail closed).
+try {
+  auditKey()
+} catch (err) {
+  console.error(`${err.message}. Set it to a random secret of at least 32 characters`)
+  console.error('(scripts/dev.sh setup writes one to .gatekeep.local.env).')
+  process.exit(1)
+}
 
 await runSchema(pool)
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "GateKeep API - tamper-evident per-run SHA-256 audit chain",
+  "description": "GateKeep API - per-run HMAC-SHA256 audit chain with a sealed head",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",

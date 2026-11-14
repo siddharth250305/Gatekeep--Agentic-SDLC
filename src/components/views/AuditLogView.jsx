@@ -9,6 +9,15 @@ function shortHash(h) {
   return `${h.slice(0, 8)}…${h.slice(-6)}`
 }
 
+// What each verify reason from the backend (audit/chain.js) means.
+const BREAK_MESSAGES = {
+  hash_mismatch: 'A stored audit entry was changed after it was written. Its HMAC stamp, made with a key kept outside the database, no longer matches its contents, and nobody without the key can make a new one.',
+  prev_hash_mismatch: 'An audit entry no longer points at the entry before it: entries were removed, reordered or inserted.',
+  truncated: 'The newest audit entries were deleted. The sealed chain head records more entries than the database still holds.',
+  head_mismatch: 'The sealed chain head does not match the last entry: it was moved or forged to hide changes.',
+  head_missing: 'The sealed chain head for this run was deleted, so missing entries could not otherwise be detected.',
+}
+
 export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper, onRefresh }) {
   const [copiedHash, setCopiedHash] = useState(null)
   const [filterQuery, setFilterQuery] = useState('')
@@ -18,7 +27,9 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
   const auditChain = targetRun?.auditChain || []
   const verify = targetRun?.verify || {}
   const isVerified = targetRun?.verified !== false && verify?.valid !== false
-  const brokenAt = verify?.brokenAt ?? (targetRun?.verified === false ? 2 : null)
+  // Only the block the server named; a deleted head names none (never guess one).
+  const brokenAt = verify?.brokenAt ?? null
+  const breakMessage = BREAK_MESSAGES[verify?.reason] || BREAK_MESSAGES.hash_mismatch
 
   // Collect all events across all runs for the historical table
   const allRows = runs.flatMap((r) =>
@@ -82,12 +93,12 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-[#ff3b30]/12 border border-[#ff3b30]/25 px-3 py-0.5 text-[11.5px] font-semibold text-[#d70015] dark:bg-[#ff453a]/20 dark:border-[#ff453a]/30 dark:text-[#ff453a]">
-                  <ShieldAlert size={14} strokeWidth={2.5} /> Tamper Detected (#{brokenAt})
+                  <ShieldAlert size={14} strokeWidth={2.5} /> Tamper Detected{brokenAt != null ? ` (#${brokenAt})` : ''}
                 </span>
               )}
             </div>
             <p className="mt-1 text-[13px] text-muted dark:text-[#a1a1aa]">
-              Tamper-evident, SHA-256 hash-chained immutable record. Any database modification immediately breaks downstream block hashes.
+              Each entry is stamped with an HMAC-SHA256 key kept outside the database, covering the run ID and the previous stamp. Editing, copying or deleting entries breaks the chain.
             </p>
           </div>
 
@@ -123,11 +134,10 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
               </span>
               <div className="space-y-1">
                 <div className="font-semibold text-red text-[14px]">
-                  Cryptographic Integrity Failure Detected at Block #{brokenAt}
+                  Cryptographic Integrity Failure Detected{brokenAt != null ? ` at Block #${brokenAt}` : ''}
                 </div>
                 <div className="text-muted text-[12.5px] leading-relaxed dark:text-[#d1d5db]">
-                  An attacker or unauthorized process modified the underlying database record for audit event #{brokenAt}.
-                  Because the hash was calculated using the original payload, the recomputed SHA-256 hash does not match the stored cryptographic chain.
+                  {breakMessage}
                 </div>
                 {verify?.storedHash && verify?.recomputedHash && (
                   <div className="mt-2 font-mono text-[11px] text-red/90 bg-red/10 rounded-lg p-2.5 dark:text-red-300 dark:bg-red-950/40">
@@ -150,7 +160,7 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
               Block Sequence Chain ({targetRun?.id || 'RUN-0427'})
             </h3>
           </div>
-          <span className="font-mono text-[11px] text-faint dark:text-[#8e8e93]">Algorithm: SHA-256 hash chain</span>
+          <span className="font-mono text-[11px] text-faint dark:text-[#8e8e93]">Algorithm: HMAC-SHA256 chain, run-bound, head-sealed</span>
         </div>
 
         {auditChain.length === 0 ? (
@@ -280,7 +290,7 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
               <th className="px-4 py-2.5">Seq</th>
               <th className="px-4 py-2.5">Event</th>
               <th className="px-4 py-2.5">Actor</th>
-              <th className="px-4 py-2.5">SHA-256 Hash</th>
+              <th className="px-4 py-2.5">HMAC Stamp</th>
               <th className="px-4 py-2.5">Status</th>
             </tr>
           </thead>
