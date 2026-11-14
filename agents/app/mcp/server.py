@@ -1,7 +1,8 @@
 """GateKeep MCP Server — provider-agnostic governance layer for external AI agents.
 
-Exposes 20 governed tools over MCP (SSE transport on 127.0.0.1:8078 by default).  Every tool
-call goes through the PolicyEngine before reaching the GateKeepTools layer.
+Exposes 20 governed tools over MCP (SSE transport on 127.0.0.1:8078 by default). This file
+is a thin adapter: each tool resolves the client's session and calls GateKeepTools, which
+checks the phase and file policy on every call (the same check the built-in pipeline uses).
 
 Usage:
     python -m agents.app.mcp.server          # direct
@@ -26,11 +27,9 @@ if _AGENTS_ROOT not in sys.path:
 from mcp.server import MCPServer
 
 try:
-    from .policy import PolicyEngine
     from .session import McpSession, SessionManager
     from .tools import GateKeepTools
 except ImportError:
-    from app.mcp.policy import PolicyEngine
     from app.mcp.session import McpSession, SessionManager
     from app.mcp.tools import GateKeepTools
 
@@ -39,7 +38,6 @@ except ImportError:
 mcp = MCPServer("GateKeep")
 
 session_manager = SessionManager()
-policy = PolicyEngine()
 tools = GateKeepTools(session_manager)
 
 
@@ -47,9 +45,7 @@ tools = GateKeepTools(session_manager)
 
 def _ensure_session(run_id: str) -> McpSession:
     """Look up an existing session for the run or create a new one."""
-    session = session_manager.get_session_by_run(run_id)
-    if session is None:
-        session = session_manager.create_session(run_id)
+    session = session_manager.session_for_run(run_id)
     try:
         caller = sys._getframe(1).f_code.co_name
         if caller.startswith("gatekeep_"):
@@ -57,34 +53,6 @@ def _ensure_session(run_id: str) -> McpSession:
     except Exception:
         pass
     return session
-
-
-def _policy_gate(run: dict[str, Any], tool_name: str, path: str | None = None, write: bool = False) -> dict | None:
-    """Run policy checks; return an error dict if denied, else None.
-
-    Every denial is written to the run's audit log."""
-    phase = policy.current_phase(run)
-
-    if phase is None:
-        denial = {
-            "error": "This run has no active phase (it is finished or cancelled), "
-                     "so no tool can act on it.",
-            "status": run.get("status"),
-            "tool": tool_name,
-        }
-    else:
-        denial = None
-        result = policy.check_tool(phase, tool_name)
-        if not result.allowed:
-            denial = {"error": result.reason, "phase": phase, "tool": tool_name}
-        elif path is not None:
-            result = policy.check_file_access(path, write=write)
-            if not result.allowed:
-                denial = {"error": result.reason, "path": path, "tool": tool_name}
-
-    if denial and run.get("id"):
-        tools._audit(run["id"], "mcp.policy.denied", denial)
-    return denial
 
 
 # ── tools ────────────────────────────────────────────────────────────────
@@ -119,10 +87,6 @@ def gatekeep_get_repository_context(run_id: str) -> dict[str, Any]:
     dependency files, and the most relevant source files for the feature request.
     The workspace must already be cloned (run must be started)."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "get_repository_context")
-    if deny:
-        return deny
     return tools.get_repository_context(session.session_id)
 
 
@@ -130,10 +94,6 @@ def gatekeep_get_repository_context(run_id: str) -> dict[str, Any]:
 def gatekeep_list_files(run_id: str) -> list[str] | dict[str, str]:
     """List all tracked source and configuration files in the run's workspace repository."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "list_files")
-    if deny:
-        return deny
     return tools.list_files(session.session_id)
 
 
@@ -143,10 +103,6 @@ def gatekeep_read_file(run_id: str, path: str) -> str | dict[str, str]:
     and shortcuts (symlinks) to them or outside the workspace, are blocked.
     Secrets in content are replaced with ***. Max 40KB."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "read_file", path=path, write=False)
-    if deny:
-        return deny
     return tools.read_file(session.session_id, path)
 
 
@@ -155,10 +111,6 @@ def gatekeep_search_code(run_id: str, query: str) -> list[dict[str, Any]] | dict
     """Search the workspace codebase for a text query, class name, or function name.
     Returns matching lines with file paths and line numbers (max 50 results)."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "search_code")
-    if deny:
-        return deny
     return tools.search_code(session.session_id, query)
 
 
@@ -167,10 +119,6 @@ def gatekeep_get_requirements_context(run_id: str) -> dict[str, Any]:
     """Get the current requirements artifact and phase status. Only available
     during the requirements phase."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "get_requirements_context")
-    if deny:
-        return deny
     return tools.get_requirements_context(session.session_id)
 
 
@@ -180,10 +128,6 @@ def gatekeep_submit_requirements(run_id: str, requirements: str) -> dict[str, An
     pauses until a Planner approves or requests rework. Only allowed during
     the requirements phase."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "submit_requirements")
-    if deny:
-        return deny
     return tools.submit_requirements(session.session_id, requirements)
 
 
@@ -192,10 +136,6 @@ def gatekeep_get_design_context(run_id: str) -> dict[str, Any]:
     """Get the current design artifact, approved requirements, and phase status.
     Only available during the design phase."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "get_design_context")
-    if deny:
-        return deny
     return tools.get_design_context(session.session_id)
 
 
@@ -205,10 +145,6 @@ def gatekeep_submit_design(run_id: str, design: str) -> dict[str, Any]:
     pauses until an Engineer approves or requests rework. Only allowed during
     the design phase. Requirements must be approved first."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "submit_design")
-    if deny:
-        return deny
     return tools.submit_design(session.session_id, design)
 
 
@@ -218,10 +154,6 @@ def gatekeep_apply_patch(run_id: str, path: str, find: str, replace: str) -> dic
     with new code (replace) in the specified file. Has a whitespace-tolerant
     fallback. Only allowed during the coding phase. Sensitive files are blocked."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "apply_patch", path=path, write=True)
-    if deny:
-        return deny
     return tools.apply_patch(session.session_id, path, find, replace)
 
 
@@ -231,10 +163,6 @@ def gatekeep_write_file(run_id: str, path: str, content: str) -> dict[str, Any]:
     Prefer apply_patch for edits. Only allowed during the coding phase.
     Sensitive files are blocked."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "write_file", path=path, write=True)
-    if deny:
-        return deny
     return tools.write_file(session.session_id, path, content)
 
 
@@ -243,10 +171,6 @@ def gatekeep_get_diff(run_id: str) -> str | dict[str, str]:
     """Get the git diff (HEAD) of all changes made in the workspace.
     Only available during the coding phase."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "get_diff")
-    if deny:
-        return deny
     return tools.get_diff(session.session_id)
 
 
@@ -258,10 +182,6 @@ def gatekeep_run_tests(run_id: str, target: str | None = None) -> dict[str, Any]
     pytest's JUnit report and are recorded against the exact code fingerprint.
     Only allowed during the coding phase."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "run_tests")
-    if deny:
-        return deny
     return tools.run_tests(session.session_id, target)
 
 
@@ -270,10 +190,6 @@ def gatekeep_get_test_results(run_id: str) -> dict[str, Any]:
     """Get the latest test results and Docker sandbox configuration.
     Only available during the coding phase."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "get_test_results")
-    if deny:
-        return deny
     return tools.get_test_results(session.session_id)
 
 
@@ -284,10 +200,6 @@ def gatekeep_request_approval(run_id: str, summary: str) -> dict[str, Any]:
     Code or Design. Provide a summary of the work so the reviewer has context.
     After this call no more code changes are possible until a reviewer decides."""
     session = _ensure_session(run_id)
-    run = tools.get_run(session.session_id)
-    deny = _policy_gate(run, "request_approval")
-    if deny:
-        return deny
     return tools.request_approval(session.session_id, summary)
 
 
@@ -380,8 +292,8 @@ def main():
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="[GateKeep MCP] %(message)s")
     log = logging.getLogger("gatekeep.mcp")
 
-    # Automatically register active session on startup so dashboard indicates connection
-    session_manager.auto_register_startup()
+    # No session is bound at startup: a client's first call for a run makes
+    # one (G8). Binding to "some run" here attached robots to the wrong run.
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")

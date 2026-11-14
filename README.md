@@ -138,7 +138,7 @@ The project is split into four clean components:
 |       Audit: get_audit_log, report_model                                       |
 |   - PolicyEngine: Enforces phase permissions, blocks path traversal, filters   |
 |     sensitive files (.env, *.key, *.pem)                                       |
-|   - SessionManager: Maps sessions to isolated workspaces                       |
+|   - SessionManager: Maps sessions to runs; idle sessions expire (1 h)         |
 +--------------------------------------------------------------------------------+
                                         |
                                         | REST & WebSocket RPC
@@ -276,6 +276,8 @@ export GATEKEEP_PIPELINE_SECRET=...          # same value as the backend
 uvicorn app.main:app --port 8077
 ```
 
+**Two ways to run the agent, one set of rules.** In *MCP mode* an outside robot (Claude Desktop, Cursor) calls GateKeep's tools. In *pipeline mode* GateKeep runs the agent itself with `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (no key: an offline fake model). Both modes act only through the same tool layer (`GateKeepTools.call` in `agents/app/mcp/tools.py`), which checks the phase and file policy on every call and records refusals in the audit log. The pipeline keeps no run state: each step reads the run from the backend, so restarting the agent service or the backend never leaves a run stuck (both pick unfinished pipeline runs back up on startup). Its start and resume calls answer at once and the work runs in the background, so a slow model or a 30-second sandbox run never freezes the service.
+
 ### 3. Start the Frontend Dashboard
 
 ```bash
@@ -318,7 +320,7 @@ gatekeeper/
 ├── agents/                  # Python agent backend & MCP server
 │   ├── app/
 │   │   ├── mcp/             # MCP tool definitions, session manager, policy engine
-│   │   ├── graph.py         # LangGraph workflow definition
+│   │   ├── graph.py         # Pipeline mode: the built-in agent, one step per call
 │   │   └── sandbox.py       # Docker test runner (--network none)
 │   └── tests/               # Unit and integration test suites
 ├── backend/                 # Node.js orchestration backend

@@ -4,6 +4,7 @@ import {
   claimStart, releaseStart, writeStepArtifacts, upsertRepoContext, addComment, deleteComment, recordTestRun, SANDBOX_FIELDS,
 } from '../runs/service.js'
 import { actorName, requireAgent, requireAny, requireHuman } from '../auth/middleware.js'
+import { connectionRefused, pipelineHeaders, pipelineUrl } from '../runs/pipeline.js'
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
@@ -34,25 +35,6 @@ const REFUSALS = {
 function refuse(res, out) {
   const [status, message] = REFUSALS[out.error] || [409, () => 'refused']
   return res.status(status).json({ error: message(out), reason: out.error, step: out.step })
-}
-
-// Calls from the backend to the agent pipeline carry a shared secret, so only
-// the backend (after checking the reviewer's login) can resume a paused gate.
-function pipelineHeaders() {
-  return {
-    'content-type': 'application/json',
-    'x-gatekeep-pipeline-secret': process.env.GATEKEEP_PIPELINE_SECRET || '',
-  }
-}
-
-// True when fetch failed because nothing listens at the pipeline address, the
-// one failure where the decision certainly never reached the graph. (With
-// localhost resolving to IPv4 and IPv6, Node reports one error per address.)
-function connectionRefused(err) {
-  const cause = err?.cause
-  if (cause?.code === 'ECONNREFUSED') return true
-  return Array.isArray(cause?.errors) && cause.errors.length > 0
-    && cause.errors.every((e) => e.code === 'ECONNREFUSED')
 }
 
 export function runsRouter(db, broadcast = () => {}) {
@@ -88,7 +70,6 @@ export function runsRouter(db, broadcast = () => {}) {
   // graph began, so releasing it could launch a second graph for the run.
   r.post('/runs/:runId/start', requireHuman, wrap(async (req, res) => {
     const { runId } = req.params
-    const pipelineUrl = process.env.PIPELINE_URL || 'http://localhost:8077'
     const claim = await claimStart(db, runId)
     if (claim.error === 'not_found') return res.status(404).json({ error: 'run not found' })
     if (claim.error) {
@@ -98,7 +79,7 @@ export function runsRouter(db, broadcast = () => {}) {
     const run = await getRun(db, runId)
     let resp
     try {
-      resp = await fetch(`${pipelineUrl}/pipeline/${encodeURIComponent(runId)}/start`, {
+      resp = await fetch(`${pipelineUrl()}/pipeline/${encodeURIComponent(runId)}/start`, {
         method: 'POST', headers: pipelineHeaders(),
         body: JSON.stringify({ brief: run.brief, repo: run.repo, branch: run.branch }),
       })
@@ -137,10 +118,9 @@ export function runsRouter(db, broadcast = () => {}) {
   // does not know the run (MCP mode), is fine; any other failure is reported
   // back as a warning next to the recorded decision.
   async function resumePipeline(runId, body) {
-    const pipelineUrl = process.env.PIPELINE_URL || 'http://localhost:8077'
     let resp
     try {
-      resp = await fetch(`${pipelineUrl}/pipeline/${encodeURIComponent(runId)}/resume`, {
+      resp = await fetch(`${pipelineUrl()}/pipeline/${encodeURIComponent(runId)}/resume`, {
         method: 'POST', headers: pipelineHeaders(), body: JSON.stringify(body),
       })
     } catch (err) {

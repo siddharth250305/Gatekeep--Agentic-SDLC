@@ -1,136 +1,101 @@
-"""The LangGraph pipeline under the backend state machine (B1, B2, B4).
+"""The pipeline under the backend state machine (B1, B2, B4).
 
 The pipeline does work and reports it. It never writes a phase's state or a
-run's status: it calls the backend's robot actions (submit_requirements,
-submit_design, request_review), and its gate nodes only wait for the human
-decision the backend has already recorded, then route on it."""
+run's status: it hands work over with the backend's robot actions (through
+GateKeepTools), and the step the backend says the run is at decides what it
+does next. Gate decisions are the backend's; the pipeline only follows them."""
 
 import re
 
-from app.graph import build_graph, resume_run, start_run
+import pytest
+
+from app.graph import build_pipeline, rework_feedback
 from app.llm import FakeLLM
-from app.reporter import NullReporter
+from app.mcp.session import SessionManager
+from app.mcp.tools import GateKeepTools
+from app.reporter import HttpReporter
+from app.sandbox import FakeRunner
+from tests.conftest import BASE
 
 # What the backend accepts on POST /runs/:id/audit from an agent (E2).
 AGENT_EVENT = re.compile(r"^(mcp|repo|workspace|sandbox|pipeline)\.[a-z0-9_.-]{1,80}$")
 STATE_FIELDS = {"state", "status", "at"}
+MOVES = {"requirements.submitted", "design.submitted", "code.review_requested"}
 
 
-def make():
-    reporter = NullReporter()
-    return build_graph(FakeLLM(), reporter), reporter
+@pytest.fixture
+def work(node, tmp_path):
+    def run(run_id):
+        core = GateKeepTools(SessionManager(base_url=BASE), base_url=BASE, runner=FakeRunner(), workspaces=tmp_path)
+        return build_pipeline(FakeLLM(), core, HttpReporter(base=BASE)).work(run_id)
+    return run
 
 
-def assert_reports_work_only(r):
-    """B1: no phase state, no run status, and no step-change audit events."""
-    assert r.runs == []
-    for key, fields in r.phases:
-        assert not STATE_FIELDS & set(fields), (key, fields)
-    for event in r.audit_events():
-        assert AGENT_EVENT.match(event), event
+def assert_reports_work_only(node, run_id):
+    """B1: no phase state or run status is written; the only moves are the
+    robot actions, and every other audit entry is a work event."""
+    for _, _, metrics in node.phase_metrics:
+        assert not STATE_FIELDS & set(metrics), metrics
+    assert not [c for c in node.calls if c[0] == "PATCH" and c[1].startswith("/runs")]
+    for entry in node.runs[run_id]["auditChain"]:
+        if entry.get("actor") == "agent:test" and entry["event"] not in MOVES:
+            assert AGENT_EVENT.match(entry["event"]), entry["event"]
 
 
-def test_pipeline_pauses_at_first_gate_and_meters_requirements():
-    app, r = make()
-    out = start_run(app, "RUN-T1", "add rate limiting to the checkout webhook")
-    assert out["paused"] is True
-    assert out["gate"]["gate"] == "g1"
-    assert out["phases_run"] == 1
-    assert out["total_cost_usd"] > 0
-    assert out["total_tokens"] > 0
-    assert [k for k, _ in r.phases] == ["req"]          # requirements metered
-    assert r.actions == ["submit_requirements"]          # backend opens Gate 1
-    assert "pipeline.requirements.completed" in r.audit_events()
-    assert_reports_work_only(r)
+def test_full_approval_flow_reaches_done_through_gate_3(node, work):
+    node.add_run("RUN-T2")
+    for expected in ("requirements", "design", "code"):
+        assert work("RUN-T2")["did"] == expected
+        node.decide("RUN-T2", "approve")
+    assert node.runs["RUN-T2"]["step"] == "done"
+    assert [k for _, k, _ in node.phase_metrics] == ["req", "design", "code"]
+    assert_reports_work_only(node, "RUN-T2")
 
 
-def test_full_approval_flow_reaches_done_through_gate_3():
-    app, r = make()
-    start_run(app, "RUN-T2", "brief")
-    resume_run(app, "RUN-T2", "approve", gate="g1")             # g1 -> design -> g2
-    out = resume_run(app, "RUN-T2", "approve", gate="g2")       # g2 -> coding -> g3
-    assert out["paused"] is True
-    assert out["gate"] == {"gate": "g3", "role": "Engineer"}
-    assert out["phases_run"] == 3
-    assert r.actions == ["submit_requirements", "submit_design", "request_review"]
-    final = resume_run(app, "RUN-T2", "approve", gate="g3", target="done")
-    assert final["status"] == "approved"
-    assert final["paused"] is False
-    assert final["total_cost_usd"] >= out["total_cost_usd"]
-    assert_reports_work_only(r)
+def test_reject_at_gate_1_sends_the_work_back_to_requirements(node, work):
+    node.add_run("RUN-T3")
+    work("RUN-T3")
+    node.decide("RUN-T3", "reject", feedback="be specific")
+    assert work("RUN-T3")["did"] == "requirements"
+    assert node.events("RUN-T3").count("requirements.submitted") == 2
+    assert node.runs["RUN-T3"]["step"] == "g1"
 
 
-def test_reject_at_gate_1_sends_the_work_back_to_requirements():
-    app, r = make()
-    start_run(app, "RUN-T3", "brief")
-    out = resume_run(app, "RUN-T3", "reject", "be specific", gate="g1", target="req")
-    assert out["paused"] is True
-    assert out["gate"]["gate"] == "g1"
-    assert r.actions == ["submit_requirements", "submit_requirements"]
-    assert_reports_work_only(r)
+def test_reject_at_gate_2_goes_back_to_design_never_to_code(node, work):
+    node.add_run("RUN-T7", step="g2")
+    node.decide("RUN-T7", "reject")
+    assert work("RUN-T7")["did"] == "design"
+    assert "code.review_requested" not in node.events("RUN-T7")
+    assert node.runs["RUN-T7"]["step"] == "g2"
 
 
-def test_reject_at_gate_2_goes_back_to_design_never_to_code():
-    app, r = make()
-    start_run(app, "RUN-T7", "brief")
-    resume_run(app, "RUN-T7", "approve", gate="g1")
-    out = resume_run(app, "RUN-T7", "reject", gate="g2", target="design")
-    assert out["gate"]["gate"] == "g2"
-    assert "request_review" not in r.actions
-    assert r.actions == ["submit_requirements", "submit_design", "submit_design"]
+def test_reject_at_gate_3_goes_to_the_step_the_reviewer_chose(node, work):
+    node.add_run("RUN-T8", step="g3")
+    node.decide("RUN-T8", "reject", target="design")
+    assert work("RUN-T8")["did"] == "design"
+    assert node.runs["RUN-T8"]["step"] == "g2"
 
 
-def test_reject_at_gate_3_goes_to_the_step_the_reviewer_chose():
-    app, r = make()
-    start_run(app, "RUN-T8", "brief")
-    resume_run(app, "RUN-T8", "approve", gate="g1")
-    resume_run(app, "RUN-T8", "approve", gate="g2")
-    to_code = resume_run(app, "RUN-T8", "reject", "missing test", gate="g3", target="code")
-    assert to_code["gate"]["gate"] == "g3"
-    assert r.actions[-2:] == ["request_review", "request_review"]
-    to_design = resume_run(app, "RUN-T8", "reject", gate="g3", target="design")
-    assert to_design["gate"]["gate"] == "g2"
-    assert r.actions[-1] == "submit_design"
+def test_a_cancelled_run_gets_no_more_work(node, work):
+    node.add_run("RUN-T9", step="g1")
+    node.cancel("RUN-T9")
+    out = work("RUN-T9")
+    assert out["did"] is None and out["reason"] == "finished"
+    assert node.runs["RUN-T9"]["step"] == "cancelled"
 
 
-def test_cancel_ends_the_pipeline():
-    app, r = make()
-    start_run(app, "RUN-T9", "brief")
-    out = resume_run(app, "RUN-T9", "cancel", gate="g1", target="cancelled")
-    assert out["paused"] is False
-    assert out["status"] == "cancelled"
-    assert r.actions == ["submit_requirements"]
+def test_a_repeated_wake_up_does_the_step_once(node, work):
+    # Two wake-ups for one decision: the second finds the run at the next gate.
+    node.add_run("RUN-T4", step="design")
+    assert work("RUN-T4")["did"] == "design"
+    assert work("RUN-T4")["reason"] == "waiting_for_reviewer"
+    assert node.events("RUN-T4").count("design.submitted") == 1
 
 
-def test_a_late_approve_for_an_earlier_gate_is_refused():
-    # g1 approved -> the graph runs Design and pauses at g2. A second Approve
-    # meant for g1 must not land on g2.
-    app, r = make()
-    start_run(app, "RUN-T4", "brief")
-    first = resume_run(app, "RUN-T4", "approve", gate="g1")
-    assert first["resumed"] is True and first["gate"]["gate"] == "g2"
-    again = resume_run(app, "RUN-T4", "approve", gate="g1")
-    assert again == {"resumed": False, "reason": "stale_gate", "gate": "g2"}
-    assert r.actions.count("submit_design") == 1
-
-
-def test_concurrent_resumes_of_one_gate_resume_once():
-    import threading
-
-    app, r = make()
-    start_run(app, "RUN-T5", "brief")
-    results = []
-    threads = [threading.Thread(target=lambda: results.append(resume_run(app, "RUN-T5", "approve", gate="g1")))
-               for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert sorted(o["resumed"] for o in results) == [False, True]
-    assert r.actions.count("submit_design") == 1
-
-
-def test_resume_of_a_run_that_was_never_started_says_not_running():
-    app, _ = make()
-    out = resume_run(app, "RUN-NEVER", "approve", gate="g1")
-    assert out["resumed"] is False and out["reason"] == "not_running"
+def test_rework_feedback_is_only_the_open_rejection_to_this_step():
+    chain = [{"event": "g3.rejected", "payload": {"to": "design", "feedback": "rethink"}},
+             {"event": "pipeline.design.completed", "payload": {}}]
+    assert rework_feedback({"step": "design", "auditChain": chain}) == "rethink"
+    assert rework_feedback({"step": "code", "auditChain": chain}) == ""
+    chain.append({"event": "design.submitted", "payload": {}})
+    assert rework_feedback({"step": "design", "auditChain": chain}) == ""

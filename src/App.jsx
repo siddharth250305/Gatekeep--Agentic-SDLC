@@ -176,10 +176,19 @@ export default function App() {
       // applying the decision to the next gate.
       const body = { decision, feedback, gate: run.step }
       if (target) body.target = target
-      await api.decide(run.id, body)
-      flash(decision === 'approve'
-        ? `${run.id} approved. Gate advanced.`
-        : `${run.id}: rework requested. Feedback sent to agent.`)
+      const answer = await api.decide(run.id, body)
+      // The backend says when the agent service did not get the decision;
+      // the run goes on as soon as that service is up again.
+      const pipeline = answer?.pipeline
+      if (pipeline && !pipeline.resumed) {
+        flash(pipeline.reason === 'not_running'
+          ? `${run.id}: Decision recorded, but the agent service is not running. The run continues when it starts.`
+          : `${run.id}: Decision recorded, but the agent service could not be reached (${pipeline.reason}). The run continues when it is back.`, 8000)
+      } else {
+        flash(decision === 'approve'
+          ? `${run.id} approved. Gate advanced.`
+          : `${run.id}: rework requested. Feedback sent to agent.`)
+      }
       await refresh()
       return true
     } catch (e) {

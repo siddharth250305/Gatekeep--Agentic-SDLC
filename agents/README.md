@@ -1,53 +1,54 @@
-# GateKeep agents (Layer 4)
+# GateKeep agents
 
-Python + LangGraph. Runs the Requirements / Design / Coding agents with
-`interrupt()` human gates, meters token+cost per phase, and reports everything
-to the Node backend (phase metrics, audit events, run status).
+Python. Two thin adapters over one core:
 
-Runs **offline** with a deterministic fake model (no key, no network). Set
-`ANTHROPIC_API_KEY` to use a real model.
+- **MCP mode** (`app/mcp/server.py`): an outside robot (Claude Desktop, Cursor) calls the 20 `gatekeep_*` tools.
+- **Pipeline mode** (`app/main.py` + `app/graph.py`): GateKeep runs the agent itself.
+
+Both act only through `GateKeepTools.call` (`app/mcp/tools.py`): it reads the run from the Node backend,
+checks the phase and file policy (`app/mcp/policy.py`), records a refusal in the audit log, and only then runs
+the tool. Run state (which step, who must approve) belongs to the Node backend; nothing here decides it
+(`docs/adr/0001-node-owns-run-state.md`).
 
 ## Layout
 
-- `app/pricing.py`  - price table + `cost_usd()`
-- `app/llm.py`      - `FakeLLM` (deterministic) + `AnthropicLLM` (real) + `get_llm()`
-- `app/graph.py`    - LangGraph StateGraph: agent nodes meter + report, gate nodes `interrupt()`
-- `app/reporter.py` - pushes phase/audit/run updates to the Node API
-- `app/main.py`     - FastAPI: `/pipeline/{run_id}/start` and `/resume`
+- `app/mcp/tools.py`   - `GateKeepTools`: the policy-checked tools both modes use
+- `app/mcp/policy.py`  - which tool may run in which step, and which files may be read or written
+- `app/mcp/session.py` - client sessions; an idle session expires after `GATEKEEP_SESSION_TTL_SECONDS` (default 3600)
+- `app/mcp/server.py`  - the MCP server (stdio, SSE or streamable HTTP with a token)
+- `app/graph.py`       - `Pipeline.work(run_id)`: reads the run, does the step it is at (requirements, design or
+                         code, with self-heal) and hands it over; keeps no state between calls
+- `app/main.py`        - FastAPI: `/pipeline/{run_id}/start`, `/resume`, `/work` answer 202 and queue the run on a
+                         background worker; on startup it picks up unfinished pipeline runs
+- `app/llm.py`         - `GeminiLLM`, `AnthropicLLM` (both with tool calling), `FakeLLM` (offline), `get_llm()`
+- `app/sandbox.py`     - the Docker test runner (no network, 512 MB, 1 CPU, read-only code)
+- `app/reporter.py`    - phase metrics and work events to the Node API
 
-## Setup + test
+## Setup and test
 
 ```bash
 python3.13 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-python -m pytest -q        # 6 tests, offline (fake model + fake reporter)
+pip install -r requirements.txt      # add `anthropic` for Claude in pipeline mode
+python -m pytest -q                  # offline: fake model, fake backend, fake sandbox
 ```
 
-## Run against the Node backend
+## Pipeline mode against the Node backend
 
 ```bash
-# 1. Node API on :4040 (backend/) must be running.
-# 2. Start the agent service:
-GATEKEEP_API=http://localhost:4040 uvicorn app.main:app --port 8077
-
-# 3. Create a run in Node, then drive the pipeline:
-curl -XPOST localhost:4040/runs -H 'content-type: application/json' \
-  -d '{"runId":"RUN-9001","brief":"Add response caching"}'
-curl -XPOST localhost:8077/pipeline/RUN-9001/start  -d '{"brief":"Add response caching"}' -H 'content-type: application/json'
-curl -XPOST localhost:8077/pipeline/RUN-9001/resume -d '{"decision":"approve"}' -H 'content-type: application/json'   # Gate 1
-curl -XPOST localhost:8077/pipeline/RUN-9001/resume -d '{"decision":"approve"}' -H 'content-type: application/json'   # Gate 2
-curl -XPOST localhost:8077/pipeline/RUN-9001/resume -d '{"decision":"approve"}' -H 'content-type: application/json'   # final
+export GATEKEEP_API=http://localhost:4040
+export GATEKEEP_API_TOKEN=gka_...        # npm run token:create -- --name pipeline
+export GATEKEEP_PIPELINE_SECRET=...      # the same value the backend uses
+uvicorn app.main:app --port 8077
 ```
 
-Each agent phase records `input_tokens`, `output_tokens`, `cost_usd`, and
-`duration_ms` into `run_phases`; the dashboard's per-phase cost + totals come
-straight from that.
+Start a run from the dashboard (or `POST /runs/:id/start` on the backend). Gate decisions go through the
+backend, which wakes the pipeline; the pipeline reads the run back and does the next step. The model is chosen
+by `get_llm()`: `GEMINI_API_KEY`, else `ANTHROPIC_API_KEY` (`ANTHROPIC_MODEL`, default `claude-opus-5-5`), else
+the offline fake model. Each step records `input_tokens`, `output_tokens`, `cost_usd` and `duration_ms` on its
+phase.
 
-## Notes / next
-
-- Checkpointer is `MemorySaver` (in-process). For durable, cross-process gates
-  swap in `langgraph.checkpoint.postgres.PostgresSaver` against the same DB.
-- The gate resume is currently driven by this service's `/resume`. Wiring the
-  frontend's Approve button through Node to here (forward-on-decide) is the
-  small remaining integration seam.
-- Docker sandbox test execution (real pytest in a container) is Layer 5.
+Run **one** pipeline process (no `uvicorn --workers N`): a run is worked on by one thread at a time, and that
+guard lives in the process. A step that fails (model or backend error) is retried after 10 s and 60 s, then waits
+for the next gate decision or a restart; the failure is recorded on the run as `pipeline.step.failed` with
+secrets removed. The coding model is offered only the five workspace tools; the hand-over to Gate 3 is done by
+the pipeline itself.

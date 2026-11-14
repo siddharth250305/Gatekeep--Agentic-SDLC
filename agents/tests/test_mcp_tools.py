@@ -20,6 +20,7 @@ def gk_tools(tmp_path):
     t = GateKeepTools(session_manager=None, base_url="http://test-backend")
     t._get_session = lambda sid: _session()
     t._workspace_path = lambda session: str(tmp_path)
+    t._fetch_run = lambda session: {"id": "RUN-1", "step": "code", "status": "running"}
     return t
 
 
@@ -63,28 +64,29 @@ def _run(*states):
             "steps": [{"key": k, "state": s} for k, s in zip(keys, states)]}
 
 
-def test_policy_gate_denies_everything_on_a_rejected_run():
-    run = _run("approved", "approved", "approved", "rejected", "pending", "pending")
-    with patch.object(server.tools, "_audit") as audit:
-        denial = server._policy_gate(run, "submit_requirements")
-    assert denial is not None and "no active phase" in denial["error"]
+# The policy check lives in GateKeepTools.call, shared by MCP and the pipeline (G9).
+
+def test_policy_denies_everything_on_a_rejected_run(gk_tools):
+    gk_tools._fetch_run = lambda session: _run("approved", "approved", "approved", "rejected", "pending", "pending")
+    with patch.object(gk_tools, "_audit") as audit:
+        denial = gk_tools.submit_requirements("s1", "R")
+    assert "no active phase" in denial["error"]
     audit.assert_called_once()
     assert audit.call_args.args[1] == "mcp.policy.denied"
 
 
-def test_policy_gate_denies_and_audits_git_writes_in_code_phase():
-    run = _run("approved", "approved", "approved", "approved", "active", "pending")
-    with patch.object(server.tools, "_audit") as audit:
-        denial = server._policy_gate(run, "write_file", path=".git/config", write=True)
-    assert denial is not None and ".git" in denial["error"]
+def test_policy_denies_and_audits_git_writes_in_code_phase(gk_tools, tmp_path):
+    gk_tools._fetch_run = lambda session: _run("approved", "approved", "approved", "approved", "active", "pending")
+    with patch.object(gk_tools, "_audit") as audit:
+        denial = gk_tools.write_file("s1", ".git/config", "[core]")
+    assert ".git" in denial["error"]
     assert audit.call_args.args[1] == "mcp.policy.denied"
+    assert not (tmp_path / ".git").exists()
 
 
-def test_policy_gate_allows_a_normal_write_in_code_phase():
+def test_policy_allows_a_normal_write_in_code_phase(gk_tools):
     run = _run("approved", "approved", "approved", "approved", "active", "pending")
-    with patch.object(server.tools, "_audit") as audit:
-        assert server._policy_gate(run, "write_file", path="src/app.py", write=True) is None
-    audit.assert_not_called()
+    assert gk_tools.policy.evaluate(run, "write_file", path="src/app.py", write=True) is None
 
 
 def test_server_listens_on_localhost_by_default(monkeypatch):
@@ -92,8 +94,7 @@ def test_server_listens_on_localhost_by_default(monkeypatch):
     monkeypatch.delenv("GATEKEEP_MCP_HOST", raising=False)
     monkeypatch.setenv("GATEKEEP_MCP_TOKEN", "t0ken")
     monkeypatch.setattr("sys.argv", ["server", "--transport", "sse"])
-    with patch.object(server.session_manager, "auto_register_startup"), \
-         patch("uvicorn.run") as run:
+    with patch("uvicorn.run") as run:
         server.main()
     assert run.call_args.kwargs["host"] == "127.0.0.1"
 
@@ -102,8 +103,7 @@ def test_network_transport_refuses_to_start_without_a_token(monkeypatch):
     """D7: there is no unauthenticated network mode."""
     monkeypatch.delenv("GATEKEEP_MCP_TOKEN", raising=False)
     monkeypatch.setattr("sys.argv", ["server", "--transport", "sse"])
-    with patch.object(server.session_manager, "auto_register_startup"), \
-         patch("uvicorn.run") as run, pytest.raises(SystemExit, match="GATEKEEP_MCP_TOKEN"):
+    with patch("uvicorn.run") as run, pytest.raises(SystemExit, match="GATEKEEP_MCP_TOKEN"):
         server.main()
     run.assert_not_called()
 

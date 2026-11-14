@@ -1,6 +1,9 @@
 """Model price table + cost calculation. USD per 1M tokens (input, output)."""
 
 PRICES = {
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-sonnet-4": (3.0, 15.0),
     "claude-3-5-sonnet-20241022": (3.0, 15.0),
     "claude-3-7-sonnet-20250219": (3.0, 15.0),

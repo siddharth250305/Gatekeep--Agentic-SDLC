@@ -1,18 +1,23 @@
-"""GateKeep MCP tool implementations — wraps existing WorkspaceTools, Docker
-sandbox, and Node backend API into a session-scoped governance layer.
+"""GateKeepTools: the one core both ways of running GateKeep act through.
 
-Every method takes a session_id to resolve the workspace and run context.
-State-mutating operations are audit-logged through the backend."""
+MCP mode (an outside robot over the MCP server) and pipeline mode (the
+built-in agent in graph.py) are thin adapters over this class. Every tool call
+goes through ``GateKeepTools.call``, which reads the run from the backend,
+checks the phase and file policy, records a refusal in the audit log, and only
+then runs the tool. State-changing work is audit-logged through the backend,
+and run state itself only ever changes through the backend's robot actions."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 import httpx
 
@@ -21,7 +26,7 @@ from ..repository.tools import WorkspaceTools
 from ..backend_auth import auth_headers
 from ..diffing import diff_artifacts, workspace_diff
 from ..fingerprint import tree_fingerprint
-from ..sandbox import SandboxRunner
+from ..sandbox import SandboxRunner, sandbox_profile
 from ..workspace import WORKSPACES, validate_run_id
 from .policy import PolicyEngine
 from .session import McpSession, SessionManager
@@ -34,6 +39,8 @@ log = logging.getLogger("gatekeep.mcp")
 BACKEND_ERRORS = (httpx.HTTPError, ValueError)
 # What building a workspace diff can fail with: git timing out or missing.
 DIFF_ERRORS = (subprocess.SubprocessError, OSError)
+# Tool arguments that must be strings (checked before the policy sees them).
+TEXT_ARGS = frozenset({"path", "find", "replace", "content", "query", "summary", "requirements", "design", "model"})
 
 
 @contextmanager
@@ -56,10 +63,13 @@ def _undo_on_failure(target: Path) -> Iterator[None]:
 class GateKeepTools:
     """Wraps core GateKeep capabilities behind session-aware, audit-traced methods."""
 
-    def __init__(self, session_manager: SessionManager, base_url: str | None = None):
+    def __init__(self, session_manager: SessionManager, base_url: str | None = None,
+                 runner: Any = None, workspaces: str | Path | None = None):
         self.session_manager = session_manager
         self.policy = PolicyEngine()
         self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4040")
+        self.runner = runner or SandboxRunner()
+        self.workspaces = Path(workspaces) if workspaces else WORKSPACES
         # One lock per run: a write, a test run and a review request on the
         # same workspace never interleave, so the fingerprint handed over at
         # "request review" is the code that was actually there (B6, B7).
@@ -81,12 +91,11 @@ class GateKeepTools:
 
     def _workspace_path(self, session: McpSession) -> str:
         """Resolve the absolute workspace directory for a session's run."""
-        return str(WORKSPACES / validate_run_id(session.run_id))
+        return str(self.workspaces / validate_run_id(session.run_id))
 
-    def _get_workspace_tools(self, session_id: str) -> WorkspaceTools:
-        """Create a WorkspaceTools instance scoped to the session's run workspace."""
-        session = self._get_session(session_id)
-        return WorkspaceTools(self._workspace_path(session))
+    def workspace_path(self, session_id: str) -> str:
+        """The workspace directory of a session's run."""
+        return self._workspace_path(self._get_session(session_id))
 
     def _backend_get(self, path: str) -> dict[str, Any] | list[Any]:
         """GET request to the Node backend. Collections (/runs, /audit) come
@@ -142,7 +151,8 @@ class GateKeepTools:
                 refusal = resp.json()
             except ValueError:
                 refusal = {}
-            return False, {"error": refusal.get("error") or f"refused ({resp.status_code})", "step": refusal.get("step")}
+            return False, {"error": refusal.get("error") or f"refused ({resp.status_code})",
+                           "step": refusal.get("step")}
         resp.raise_for_status()
         return True, resp.json()
 
@@ -163,10 +173,50 @@ class GateKeepTools:
                 raise RuntimeError(f"audit log unavailable, action was not applied: {exc}") from exc
             log.warning("audit warning: %s", exc)
 
+
+    def _fetch_run(self, session: McpSession) -> dict[str, Any]:
+        return self._backend_get_object(f"runs/{session.run_id}")
+
+    def read_run(self, run_id: str) -> dict[str, Any]:
+        """Read a run without a session. Only for the pipeline's own
+        scheduling (is there work at all?); it is not a tool and acts on nothing."""
+        return self._backend_get_object(f"runs/{validate_run_id(run_id)}")
+
+    # ── the policy-checked entry point ───────────────────────────────────
+
+    def call(self, session_id: str, tool: str, **args: Any) -> Any:
+        """Run one tool for a session, after the policy allows it.
+
+        This is the only way into a tool, for MCP clients and for the
+        pipeline alike: the run is read from the backend, the phase and file
+        rules are checked, and a refusal is returned and written to the audit
+        log instead of running the tool (G9)."""
+        session = self._get_session(session_id)
+        bad = sorted(k for k in TEXT_ARGS & set(args) if not isinstance(args[k], str))
+        if bad:  # the policy and the tool must judge the same value
+            return {"error": f"{', '.join(bad)} must be text", "tool": tool}
+        run = self._fetch_run(session)
+        path = args.get("path") if tool in self.policy.FILE_TOOLS else None
+        denial = self.policy.evaluate(run, tool, path=path, write=self.policy.FILE_TOOLS.get(tool, False))
+        if denial is None:
+            impl = getattr(self, f"_tool_{tool}", None)
+            if impl is None:
+                denial = {"error": f"Unknown tool '{tool}'", "tool": tool}
+            else:
+                try:
+                    inspect.signature(impl).bind(session, run, **args)
+                except TypeError as exc:
+                    return {"error": f"Bad arguments for {tool}: {exc}", "tool": tool}
+                return impl(session, run, **args)
+        if run.get("id"):
+            self._audit(run["id"], "mcp.policy.denied", denial)
+        return denial
+
     # ── run / context ────────────────────────────────────────────────────
 
     def list_runs(self) -> list[dict[str, Any]]:
-        """List all active and recent runs in GateKeep."""
+        """List all active and recent runs in GateKeep. Read-only and not tied
+        to one run, so it needs no session."""
         runs = self._backend_get_list("runs")
         return [
             {
@@ -176,6 +226,8 @@ class GateKeepTools:
                 "status": r.get("status"),
                 "gate": r.get("gate"),
                 "awaiting": r.get("awaiting"),
+                "step": r.get("step"),
+                "started": r.get("started"),
             }
             for r in runs
             if isinstance(r, dict)
@@ -183,8 +235,10 @@ class GateKeepTools:
 
     def get_run(self, session_id: str) -> dict[str, Any]:
         """Get the full run object from the Node backend."""
-        session = self._get_session(session_id)
-        return self._backend_get_object(f"runs/{session.run_id}")
+        return self.call(session_id, "get_run")
+
+    def _tool_get_run(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
+        return run
 
     def get_agent_context(self, session_id: str) -> dict[str, Any]:
         """Return a structured context packet for the external LLM.
@@ -192,8 +246,9 @@ class GateKeepTools:
         Includes current phase, repository info, approved requirements/design,
         active restrictions, and previous test failures if any.
         """
-        run = self.get_run(session_id)
+        return self.call(session_id, "get_agent_context")
 
+    def _tool_get_agent_context(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
         active_phase = self.policy.current_phase(run)
         if active_phase is None:
             # Finished or rejected: nothing is allowed.
@@ -227,13 +282,12 @@ class GateKeepTools:
 
     def get_repository_context(self, session_id: str) -> dict[str, Any]:
         """Build rich repository context (manifest, relevant files) for a run."""
-        session = self._get_session(session_id)
-        run = self.get_run(session_id)
-        workspace = self._workspace_path(session)
+        return self.call(session_id, "get_repository_context")
 
+    def _tool_get_repository_context(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
+        workspace = self._workspace_path(session)
         if not os.path.isdir(workspace):
             return {"error": f"Workspace not found: {session.run_id}. Start the pipeline first."}
-
         return build_context(
             workspace=workspace,
             feature_request=run.get("brief", ""),
@@ -245,21 +299,32 @@ class GateKeepTools:
 
     def list_files(self, session_id: str) -> list[str]:
         """List all tracked source files in the workspace."""
-        return self._get_workspace_tools(session_id).list_files()
+        return self.call(session_id, "list_files")
+
+    def _tool_list_files(self, session: McpSession, run: dict[str, Any]) -> list[str]:
+        return WorkspaceTools(self._workspace_path(session)).list_files()
 
     def read_file(self, session_id: str, path: str) -> str:
         """Read a file from the workspace (secret-scrubbed, size-capped)."""
-        return self._get_workspace_tools(session_id).read_file(path)
+        return self.call(session_id, "read_file", path=path)
+
+    def _tool_read_file(self, session: McpSession, run: dict[str, Any], path: str) -> str:
+        return WorkspaceTools(self._workspace_path(session)).read_file(path)
 
     def search_code(self, session_id: str, query: str) -> list[dict[str, Any]]:
         """Case-insensitive substring search across workspace files."""
-        return self._get_workspace_tools(session_id).search_code(query)
+        return self.call(session_id, "search_code", query=query)
+
+    def _tool_search_code(self, session: McpSession, run: dict[str, Any], query: str) -> list[dict[str, Any]]:
+        return WorkspaceTools(self._workspace_path(session)).search_code(query)
 
     # ── requirements ─────────────────────────────────────────────────────
 
     def get_requirements_context(self, session_id: str) -> dict[str, Any]:
         """Get the current requirements artifact from the run."""
-        run = self.get_run(session_id)
+        return self.call(session_id, "get_requirements_context")
+
+    def _tool_get_requirements_context(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
         return {
             "requirements": run.get("requirements"),
             "status": run.get("status"),
@@ -272,7 +337,9 @@ class GateKeepTools:
     def submit_requirements(self, session_id: str, requirements: str) -> dict[str, Any]:
         """Hand the requirements to the backend, which opens Gate 1 if the run
         is at Requirements. They are stored only if that move is allowed."""
-        session = self._get_session(session_id)
+        return self.call(session_id, "submit_requirements", requirements=requirements)
+
+    def _tool_submit_requirements(self, session: McpSession, run: dict[str, Any], requirements: str) -> dict[str, Any]:
         ok, body = self._robot_action(session.run_id, "submit_requirements",
                                       {"artifacts": {"requirements": requirements}})
         if not ok:
@@ -283,7 +350,9 @@ class GateKeepTools:
 
     def get_design_context(self, session_id: str) -> dict[str, Any]:
         """Get the current design artifact from the run."""
-        run = self.get_run(session_id)
+        return self.call(session_id, "get_design_context")
+
+    def _tool_get_design_context(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
         return {
             "design": run.get("design"),
             "requirements": run.get("requirements"),
@@ -293,7 +362,9 @@ class GateKeepTools:
     def submit_design(self, session_id: str, design: str) -> dict[str, Any]:
         """Hand the design to the backend, which opens Gate 2 if the run is at
         Design. It is stored only if that move is allowed."""
-        session = self._get_session(session_id)
+        return self.call(session_id, "submit_design", design=design)
+
+    def _tool_submit_design(self, session: McpSession, run: dict[str, Any], design: str) -> dict[str, Any]:
         ok, body = self._robot_action(session.run_id, "submit_design", {"artifacts": {"design": design}})
         if not ok:
             return {"submitted": False, **body}
@@ -307,7 +378,7 @@ class GateKeepTools:
         the work back); any other answer, or no answer, keeps it frozen."""
         if not wt.is_frozen():
             return None
-        run = self.get_run(session.session_id)
+        run = self._fetch_run(session)
         if self.policy.current_phase(run) == "code":
             wt.thaw()
             return None
@@ -321,8 +392,11 @@ class GateKeepTools:
 
     def apply_patch(self, session_id: str, path: str, find: str, replace: str) -> dict[str, Any]:
         """Apply a surgical code edit in the workspace (find → replace)."""
-        session = self._get_session(session_id)
-        wt = self._get_workspace_tools(session_id)
+        return self.call(session_id, "apply_patch", path=path, find=find, replace=replace)
+
+    def _tool_apply_patch(self, session: McpSession, run: dict[str, Any], path: str, find: str,
+                          replace: str) -> dict[str, Any]:
+        wt = WorkspaceTools(self._workspace_path(session))
         with self._run_lock(session.run_id):
             refusal = self._frozen_refusal(session, wt, "apply_patch", path)
             if refusal:
@@ -335,8 +409,10 @@ class GateKeepTools:
 
     def write_file(self, session_id: str, path: str, content: str) -> dict[str, Any]:
         """Write or overwrite a file in the workspace."""
-        session = self._get_session(session_id)
-        wt = self._get_workspace_tools(session_id)
+        return self.call(session_id, "write_file", path=path, content=content)
+
+    def _tool_write_file(self, session: McpSession, run: dict[str, Any], path: str, content: str) -> dict[str, Any]:
+        wt = WorkspaceTools(self._workspace_path(session))
         with self._run_lock(session.run_id):
             refusal = self._frozen_refusal(session, wt, "write_file", path)
             if refusal:
@@ -349,7 +425,9 @@ class GateKeepTools:
 
     def get_diff(self, session_id: str) -> str:
         """Get `git diff HEAD` for the workspace, including new untracked files."""
-        session = self._get_session(session_id)
+        return self.call(session_id, "get_diff")
+
+    def _tool_get_diff(self, session: McpSession, run: dict[str, Any]) -> str:
         try:
             return workspace_diff(self._workspace_path(session))
         except DIFF_ERRORS as exc:
@@ -358,18 +436,22 @@ class GateKeepTools:
 
     # ── testing ──────────────────────────────────────────────────────────
 
-    def run_tests(self, session_id: str, target: str | None = None) -> dict[str, Any]:
+    def run_tests(self, session_id: str, target: str | None = None, iterations: int = 0) -> dict[str, Any]:
         """Run the project's whole test suite in the Docker sandbox and record
         the result as a test run bound to the code fingerprint (C2, C3, B7).
 
         *target* is accepted for older clients but never narrows the run: the
-        existing tests always run alongside the robot's new ones."""
-        session = self._get_session(session_id)
+        existing tests always run alongside the robot's new ones. *iterations*
+        is the self-heal round this run belongs to (0 for the first run)."""
+        return self.call(session_id, "run_tests", target=target, iterations=iterations)
+
+    def _tool_run_tests(self, session: McpSession, run: dict[str, Any], target: str | None = None,
+                        iterations: int = 0) -> dict[str, Any]:
         workspace = self._workspace_path(session)
 
         with self._run_lock(session.run_id):
             fingerprint = tree_fingerprint(workspace)
-            result = SandboxRunner().run_path(workspace)
+            result = self.runner.run_path(workspace)
 
         test_run_id = None
         try:
@@ -380,10 +462,12 @@ class GateKeepTools:
                 "failed": result["failed"],
                 "skipped": result.get("skipped", 0),
                 "total": result["total"],
+                "iterations": iterations,
                 "duration_ms": result["duration_ms"],
                 "output": result["output"][:8000],
                 "cases": result.get("cases", [])[:2000],
                 "missing_existing": result.get("missing_existing", []),
+                **sandbox_profile(self.runner),
             })
             test_run_id = recorded.get("id")
         except BACKEND_ERRORS as exc:
@@ -406,7 +490,9 @@ class GateKeepTools:
 
     def get_test_results(self, session_id: str) -> dict[str, Any]:
         """Get the latest test results from the run."""
-        run = self.get_run(session_id)
+        return self.call(session_id, "get_test_results")
+
+    def _tool_get_test_results(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
         return {
             "tests": run.get("tests"),
             "sandbox": run.get("sandbox"),
@@ -420,9 +506,9 @@ class GateKeepTools:
 
         The workspace is frozen first and the code fingerprint goes with the
         move (B6, B7). If the backend refuses, the freeze is lifted again."""
-        session = self._get_session(session_id)
-        run = self.get_run(session_id)
+        return self.call(session_id, "request_approval", summary=summary)
 
+    def _tool_request_approval(self, session: McpSession, run: dict[str, Any], summary: str) -> dict[str, Any]:
         if run.get("status") == "awaiting_gate":
             return {"already_awaiting": True, "gate": run.get("gate")}
 
@@ -444,7 +530,7 @@ class GateKeepTools:
 
     def _thaw_unless_in_review(self, session: McpSession, wt: WorkspaceTools) -> None:
         try:
-            run = self.get_run(session.session_id)
+            run = self._fetch_run(session)
         except BACKEND_ERRORS:
             return  # unknown: stay frozen (fail closed); a later write asks again
         if self.policy.current_phase(run) == "code":
@@ -493,7 +579,9 @@ class GateKeepTools:
 
     def get_approval_status(self, session_id: str) -> dict[str, Any]:
         """Check current approval status and gate assignment."""
-        run = self.get_run(session_id)
+        return self.call(session_id, "get_approval_status")
+
+    def _tool_get_approval_status(self, session: McpSession, run: dict[str, Any]) -> dict[str, Any]:
         return {
             "status": run.get("status"),
             "awaiting": run.get("awaiting"),
@@ -508,12 +596,16 @@ class GateKeepTools:
 
     def get_audit_log(self, session_id: str) -> list[dict[str, Any]]:
         """Get the full cryptographic audit chain for the run."""
-        session = self._get_session(session_id)
+        return self.call(session_id, "get_audit_log")
+
+    def _tool_get_audit_log(self, session: McpSession, run: dict[str, Any]) -> list[dict[str, Any]]:
         return self._backend_get_list(f"runs/{session.run_id}/audit")
 
     def report_model(self, session_id: str, model: str) -> dict[str, Any]:
         """Update the active session's model identifier on the backend."""
-        session = self._get_session(session_id)
+        return self.call(session_id, "report_model", model=model)
+
+    def _tool_report_model(self, session: McpSession, run: dict[str, Any], model: str) -> dict[str, Any]:
         session.model = model
         try:
             self._backend_patch(f"mcp/sessions/{session.session_id}", {"model": model})

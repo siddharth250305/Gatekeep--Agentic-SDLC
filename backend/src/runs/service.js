@@ -67,17 +67,19 @@ export async function createRun(db, { runId, brief, description = '', repo = '',
 
 export async function listRuns(db) {
   const { rows } = await db.query(
-    `SELECT r.run_id, r.brief, r.status, r.repo, r.branch, r.updated_at,
+    `SELECT r.run_id, r.brief, r.status, r.step, r.started_at, r.repo, r.branch, r.updated_at,
             COALESCE(SUM(p.cost_usd), 0) AS cost
      FROM runs r
      LEFT JOIN run_phases p ON p.run_id = r.run_id
-     GROUP BY r.run_id
+     GROUP BY r.run_id, r.step, r.started_at
      ORDER BY r.created_at DESC`,
   )
   return rows.map((r) => ({
     id: r.run_id,
     brief: r.brief,
     status: r.status,
+    step: r.step ?? null,
+    started: r.started_at != null,
     repo: r.repo,
     branch: r.branch,
     updatedAt: r.updated_at,

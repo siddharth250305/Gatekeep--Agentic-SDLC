@@ -22,7 +22,7 @@ Because each one decides state on its own, they disagree. Examples found in revi
 - Every change of state goes through one backend function that checks a fixed table of allowed moves, inside a database transaction, and writes exactly one audit event.
 - The Python services (MCP server and pipeline) **do work and report results**: they submit requirements, designs, files, diffs and test results. They ask the backend to move the run forward (for example "requirements submitted"), and the backend decides whether that move is allowed.
 - The Python services never write `state` or `status` of a phase directly. They read the current phase from the backend on every call and fail closed when it is unclear.
-- The pipeline's in-memory checkpoint is only a cache of its own progress. If it is lost, the backend's state wins.
+- The pipeline keeps no run state at all (Milestone 5): each step reads the run from the backend, so there is nothing to lose on a restart.
 
 ## How we get there
 
@@ -34,7 +34,7 @@ This ADR is the target. It is reached step by step:
 | 2 | A1 (Milestone 1) | Every caller is authenticated. Agents and humans get different rights. | Done |
 | 3 | B2 (Milestone 2) | The allowed-moves table lives in the backend (`backend/src/runs/machine.js`). | Done |
 | 4 | B1 (Milestone 2) | `PATCH /runs` is removed and `PUT /phases` takes metrics only. Robots move a run only with `POST /runs/:id/actions/:action`. | Done |
-| 5 | G9 (Milestone 5) | The pipeline calls the same backend actions as the MCP server. | Started in Milestone 2: the pipeline now uses the robot actions and no longer writes state. Keep-or-remove and the rest of G9 remain for Milestone 5. |
+| 5 | G9 (Milestone 5) | The pipeline calls the same backend actions as the MCP server. | Done. Pipeline mode is kept, as a thin client of the same `GateKeepTools` core as MCP mode (one policy check for both). It keeps no run state: each step reads the run from the backend, and both services wake unfinished pipeline runs on startup. |
 
 ## Consequences
 

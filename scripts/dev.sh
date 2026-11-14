@@ -47,7 +47,7 @@ case "$1" in
     wait_for_db
     (cd "$ROOT/backend" && PIPELINE_URL=http://localhost:8077 GATEKEEP_DEMO_MODE=1 nohup node src/server.js > /tmp/gk-api.log 2>&1 & disown)
     # Only the backend gets the audit key; the agent-facing services never see it.
-    (cd "$ROOT/agents" && . .venv/bin/activate && unset GATEKEEP_AUDIT_KEY && CHECKPOINT_DB="$PG" GATEKEEP_API=http://localhost:4040 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
+    (cd "$ROOT/agents" && . .venv/bin/activate && unset GATEKEEP_AUDIT_KEY && GATEKEEP_API=http://localhost:4040 nohup uvicorn app.main:app --port 8077 > /tmp/gk-agents.log 2>&1 & disown)
     (cd "$ROOT/agents" && . .venv/bin/activate && unset GATEKEEP_AUDIT_KEY && GATEKEEP_API=http://localhost:4040 nohup python -m app.mcp.server --transport sse > /tmp/gk-mcp.log 2>&1 & disown)
     (cd "$ROOT" && unset GATEKEEP_AUDIT_KEY && nohup npm run dev > /tmp/gk-fe.log 2>&1 & disown)
     sleep 4
@@ -66,7 +66,6 @@ case "$1" in
   reset)
     if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi  # the seed stamps the diary with GATEKEEP_AUDIT_KEY
     $DC exec -T db psql -U gatekeep -c "TRUNCATE runs, audit_events, audit_heads, run_phases, test_results, test_runs, run_artifacts RESTART IDENTITY CASCADE;" 2>/dev/null || true
-    $DC exec -T db psql -U gatekeep -c "TRUNCATE checkpoints, checkpoint_blobs, checkpoint_writes;" 2>/dev/null || true
     (cd "$ROOT/backend" && npm run seed)
     echo "reset done: demo runs reseeded (refresh the UI)"
     ;;

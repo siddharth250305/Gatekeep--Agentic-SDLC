@@ -10,6 +10,7 @@ import pytest
 from app.mcp.session import McpSession, SessionManager
 from app.fingerprint import tree_fingerprint
 from app.mcp.tools import GateKeepTools
+from app.repository.tools import WorkspaceTools
 
 BASE = "http://test-backend"
 
@@ -49,6 +50,9 @@ class FakeBackend:
 @pytest.fixture
 def backend(monkeypatch):
     fake = FakeBackend()
+    # The run is at Code unless a test says otherwise: every tool call reads
+    # it and checks the phase policy first (G9).
+    fake.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
     for name in ("get", "post", "put", "patch"):
         monkeypatch.setattr(httpx, name, lambda url, _m=name.upper(), **kw: fake.respond(_m, url, **kw))
     return fake
@@ -74,7 +78,8 @@ def test_an_unknown_session_is_refused(gk):
 def test_list_runs_keeps_only_the_public_fields(gk, backend):
     backend.routes[("GET", "/runs")] = (200, [{**_run(), "secret": "x"}, "junk"])
     assert gk.list_runs() == [{"id": "RUN-1", "brief": "add rate limiting", "repo": "https://example.com/r.git",
-                               "status": "running", "gate": None, "awaiting": None}]
+                               "status": "running", "gate": None, "awaiting": None,
+                               "step": "done", "started": None}]
 
 
 def test_list_runs_rejects_a_non_list_body(gk, backend):
@@ -133,7 +138,7 @@ def test_repository_context_is_built_from_the_run(gk, backend, tmp_path):
                                       "repository_url": "https://example.com/r.git", "commit_sha": "abc123"}
 
 
-def test_repository_tools_work_in_the_session_workspace(gk, tmp_path):
+def test_repository_tools_work_in_the_session_workspace(gk, backend, tmp_path):
     (tmp_path / "app.py").write_text("LIMIT = 5\n")
     assert gk.list_files("s1") == ["app.py"]
     assert gk.read_file("s1", "app.py") == "LIMIT = 5\n"
@@ -154,6 +159,7 @@ def _no_state_writes(backend):
 
 
 def test_submit_requirements_stores_them_and_asks_the_backend_to_open_gate_1(gk, backend):
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="req"))
     backend.routes[("POST", "/runs/RUN-1/actions/submit_requirements")] = (200, _run(active="g1", status="awaiting_gate"))
     out = gk.submit_requirements("s1", "must rate limit")
     assert out["submitted"] is True
@@ -168,6 +174,8 @@ def test_submit_requirements_stores_them_and_asks_the_backend_to_open_gate_1(gk,
 
 
 def test_a_refused_submission_is_reported_not_hidden(gk, backend):
+    # The run looked like Requirements, but the backend has moved on (a race).
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="req"))
     backend.routes[("POST", "/runs/RUN-1/actions/submit_requirements")] = (
         409, {"error": "that move is not allowed while the run is at 'design'", "reason": "not_allowed", "step": "design"})
     out = gk.submit_requirements("s1", "again")
@@ -185,6 +193,7 @@ def test_design_context_includes_the_requirements(gk, backend):
 
 
 def test_submit_design_stores_it_and_asks_the_backend_to_open_gate_2(gk, backend):
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="design"))
     backend.routes[("POST", "/runs/RUN-1/actions/submit_design")] = (200, _run(active="g2", status="awaiting_gate"))
     out = gk.submit_design("s1", "use a token bucket")
     assert out["submitted"] is True
@@ -195,17 +204,17 @@ def test_submit_design_stores_it_and_asks_the_backend_to_open_gate_2(gk, backend
 
 def test_an_optional_audit_failure_is_logged_not_raised(gk, backend, caplog):
     backend.routes[("POST", "/runs/RUN-1/audit")] = (503, {"error": "down"})
-    with patch("app.mcp.tools.SandboxRunner") as runner, \
+    with patch.object(gk, "runner") as runner, \
          caplog.at_level(logging.WARNING, logger="gatekeep.mcp"):
-        runner.return_value.run_path.return_value = SANDBOX_RESULT
+        runner.run_path.return_value = SANDBOX_RESULT
         assert gk.run_tests("s1")["status"] == "Passed"
     assert "audit warning" in caplog.text
 
 
 def test_audit_entries_never_carry_a_client_chosen_actor(gk, backend):
     # E2: the backend stamps the actor from the agent token.
-    with patch("app.mcp.tools.SandboxRunner") as runner:
-        runner.return_value.run_path.return_value = SANDBOX_RESULT
+    with patch.object(gk, "runner") as runner:
+        runner.run_path.return_value = SANDBOX_RESULT
         gk.run_tests("s1")
     body = backend.sent("POST", "/runs/RUN-1/audit")[0]
     assert "actor" not in body and "createdAt" not in body
@@ -213,14 +222,14 @@ def test_audit_entries_never_carry_a_client_chosen_actor(gk, backend):
 
 # ── coding, diff and tests ───────────────────────────────────────────────
 
-def test_get_diff_returns_empty_when_git_fails(gk, caplog):
+def test_get_diff_returns_empty_when_git_fails(gk, backend, caplog):
     with patch("app.mcp.tools.workspace_diff", side_effect=OSError("git not found")), \
          caplog.at_level(logging.WARNING, logger="gatekeep.mcp"):
         assert gk.get_diff("s1") == ""
     assert "git not found" in caplog.text
 
 
-def test_get_diff_returns_the_workspace_diff(gk):
+def test_get_diff_returns_the_workspace_diff(gk, backend):
     with patch("app.mcp.tools.workspace_diff", return_value="diff --git a/x b/x\n"):
         assert gk.get_diff("s1") == "diff --git a/x b/x\n"
 
@@ -235,8 +244,8 @@ def test_run_tests_records_a_test_run_bound_to_the_code_fingerprint(gk, backend,
     backend.routes[("POST", "/runs/RUN-1/test-runs")] = (201, {"id": "tr-1"})
     result = {**SANDBOX_RESULT, "cases": [{"name": "test_a", "file": "t.py", "outcome": "passed", "new": True}],
               "skipped": 0, "missing_existing": []}
-    with patch("app.mcp.tools.SandboxRunner") as runner:
-        runner.return_value.run_path.return_value = result
+    with patch.object(gk, "runner") as runner:
+        runner.run_path.return_value = result
         out = gk.run_tests("s1")
     assert out["test_run_id"] == "tr-1"
     [sent] = backend.sent("POST", "/runs/RUN-1/test-runs")
@@ -252,18 +261,18 @@ def test_run_tests_records_a_test_run_bound_to_the_code_fingerprint(gk, backend,
 
 def test_run_tests_always_runs_the_whole_suite(gk, backend, tmp_path):
     # C3: a target cannot narrow the run to the robot's own test file.
-    with patch("app.mcp.tools.SandboxRunner") as runner:
-        runner.return_value.run_path.return_value = SANDBOX_RESULT
+    with patch.object(gk, "runner") as runner:
+        runner.run_path.return_value = SANDBOX_RESULT
         out = gk.run_tests("s1", "tests/test_mine.py")
-    runner.return_value.run_path.assert_called_once_with(str(tmp_path))
+    runner.run_path.assert_called_once_with(str(tmp_path))
     assert "whole test suite" in out["note"]
 
 
 def test_run_tests_still_returns_results_when_reporting_fails(gk, backend, caplog):
     backend.routes[("POST", "/runs/RUN-1/test-runs")] = (500, {"error": "boom"})
-    with patch("app.mcp.tools.SandboxRunner") as runner, \
+    with patch.object(gk, "runner") as runner, \
          caplog.at_level(logging.WARNING, logger="gatekeep.mcp"):
-        runner.return_value.run_path.return_value = SANDBOX_RESULT
+        runner.run_path.return_value = SANDBOX_RESULT
         assert gk.run_tests("s1")["status"] == "Passed"
     assert "test report warning" in caplog.text
 
@@ -374,10 +383,12 @@ def _to_gate_3(gk, backend):
 def test_writes_after_request_review_are_refused(gk, backend, tmp_path):
     (tmp_path / "app.py").write_text("reviewed\n")
     _to_gate_3(gk, backend)
+    # At Gate 3 the phase policy refuses first; the freeze is the second
+    # layer (see the stale-answer test below, where only the freeze holds).
     out = gk.write_file("s1", "app.py", "changed after review\n")
-    assert out["frozen"] is True and "frozen" in out["error"]
+    assert "not allowed in phase 'g3'" in out["error"]
     out = gk.apply_patch("s1", "app.py", "reviewed", "sneaky")
-    assert out["frozen"] is True
+    assert "not allowed in phase 'g3'" in out["error"]
     assert (tmp_path / "app.py").read_text() == "reviewed\n"
     denials = [b for b in backend.sent("POST", "/runs/RUN-1/audit") if b["event"] == "mcp.policy.denied"]
     assert len(denials) == 2
@@ -411,7 +422,7 @@ def test_a_refused_review_request_does_not_freeze_the_workspace(gk, backend, tmp
 
 # ── D3: diffs and search results leaving through the MCP tools are redacted
 
-def test_get_diff_hides_secrets(gk, tmp_path):
+def test_get_diff_hides_secrets(gk, backend, tmp_path):
     import subprocess
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "settings.py").write_text('API_KEY = "sk_live_abcdef123456"\n')
@@ -428,4 +439,5 @@ def test_an_ambiguous_review_failure_keeps_the_freeze_if_the_run_reached_gate_3(
          patch("app.mcp.tools.workspace_diff", return_value=""):
         with pytest.raises(httpx.ReadTimeout):
             gk.request_approval("s1", "summary")
-    assert gk.write_file("s1", "app.py", "x\n")["frozen"] is True
+    assert WorkspaceTools(str(tmp_path)).is_frozen()
+    assert "error" in gk.write_file("s1", "app.py", "x\n")
