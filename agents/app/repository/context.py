@@ -9,7 +9,7 @@ from pathlib import Path
 from . import scanner
 from .manifest import build_manifest
 from .retriever import retrieve
-from .security import is_sensitive_path, redact_secrets
+from .security import redact_secrets, resolve_inside
 
 MAX_RELEVANT_FILES = 10
 MAX_FILE_CHARS = 6_000
@@ -32,12 +32,10 @@ def build_context(workspace: str, feature_request: str, repository_url: str,
     for r in relevant:
         if budget <= 0:
             break
-        if is_sensitive_path(r["path"]):
-            continue
         try:
-            raw = (root / r["path"]).read_text(errors="replace")[:MAX_FILE_CHARS]
-        except OSError:
-            continue
+            raw = resolve_inside(root, r["path"]).read_text(errors="replace")[:MAX_FILE_CHARS]
+        except (OSError, ValueError):
+            continue  # unreadable, a secret, or a shortcut to one (D2)
         content, redacted = redact_secrets(raw)
         content = content[:budget]
         budget -= len(content)

@@ -64,3 +64,43 @@ def test_repository_context_flows_through_the_pipeline(tmp_path):
         assert final["status"] == "approved"
     finally:
         shutil.rmtree(wsdir, ignore_errors=True)
+
+
+def test_pipeline_hands_over_the_tested_fingerprint_and_freezes_the_workspace(tmp_path):
+    # B6 + B7 in pipeline mode: the test run and "request review" carry the
+    # same code fingerprint, and the workspace is frozen until Gate 3 decides.
+    from app.fingerprint import tree_fingerprint
+    from app.repository.tools import WorkspaceTools
+
+    repo = _make_git_repo(tmp_path)
+    run_id = "RUN-FPTEST"
+    wsdir = WORKSPACES / run_id
+    shutil.rmtree(wsdir, ignore_errors=True)
+    try:
+        r = NullReporter()
+        app = build_graph(FakeLLM(), r, runner=FakeRunner())
+        start_run(app, run_id, "Add a /health endpoint", repo=repo)
+        resume_run(app, run_id, "approve")
+        resume_run(app, run_id, "approve")   # coding -> request review -> Gate 3
+
+        [test_run] = r.tests_reported
+        review = dict(r.action_bodies)["request_review"]
+        assert test_run["fingerprint"] == review["fingerprint"] == tree_fingerprint(str(wsdir))
+        assert test_run["image"] and test_run["status"] == "Passed"
+
+        tools = WorkspaceTools(str(wsdir))
+        try:
+            tools.write_file("late.py", "x = 1\n")
+            raise AssertionError("write after request_review was allowed")
+        except ValueError as err:
+            assert "frozen" in str(err)
+
+        # Back to Code: the freeze lifts, the agent can write again (the coding
+        # node would raise on a frozen workspace), re-tests, and hands over again.
+        resume_run(app, run_id, "reject", "more tests", gate="g3", target="code")
+        assert r.actions[-2:] == ["request_review", "request_review"]
+        assert len(r.tests_reported) == 2
+        assert tools.is_frozen()
+    finally:
+        shutil.rmtree(wsdir, ignore_errors=True)
+        shutil.rmtree(WORKSPACES / ".frozen" / run_id, ignore_errors=True)
