@@ -225,7 +225,17 @@ function nowLabel() {
   )
 }
 
+// A step that is open again or not reached yet has no completion time, so a
+// step sent back for rework never shows the time it was first finished (F4).
+// A finished step keeps its time unless a new one is given.
 async function setPhase(db, runId, key, state, status, at = null) {
+  if (state === 'active' || state === 'pending') {
+    await db.query(
+      'UPDATE run_phases SET state = $1, status = $2, at = NULL WHERE run_id = $3 AND key = $4',
+      [state, status, runId, key],
+    )
+    return
+  }
   await db.query(
     'UPDATE run_phases SET state = $1, status = $2, at = COALESCE($3, at) WHERE run_id = $4 AND key = $5',
     [state, status, at, runId, key],

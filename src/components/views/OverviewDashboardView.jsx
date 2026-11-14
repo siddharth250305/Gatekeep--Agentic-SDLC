@@ -1,18 +1,15 @@
 import { useState } from 'react'
 import {
-  CircleCheck, GitBranch, GitCommitHorizontal, ShieldCheck, ShieldAlert, ArrowRight, Check, RotateCcw,
-  TriangleAlert, Layers, Cpu, Box, Lock, Play,
+  CircleCheck, GitBranch, GitCommitHorizontal, ShieldCheck, ShieldAlert, ArrowRight,
+  TriangleAlert, Layers, Cpu, Box, Lock,
 } from 'lucide-react'
 import PipelineStepper from '../PipelineStepper'
 import McpSessionsPanel from './McpSessionsPanel'
+import RunStatusCard from './RunStatusCard'
 import { testOutcome } from './TestResultsView'
 
 export default function OverviewDashboardView({
   run,
-  canAct,
-  approveBlocked,
-  onApprove,
-  onRequestRework,
   onStartPipeline,
   onNavigateTab,
   onTamper,
@@ -330,99 +327,8 @@ export default function OverviewDashboardView({
         onRefresh={onRefreshMcp}
       />
 
-      {/* 3. Bottom Gate Decision Panel (Responsive to Workflow State) */}
-      <div className="card p-6 shadow-card bg-gradient-to-r from-white via-white to-accent/[0.02] dark:from-[#141416] dark:via-[#141416] dark:to-accent/[0.06]">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                  run?.awaiting ? 'bg-accent animate-ping' : run?.status === 'approved' ? 'bg-[#34c759]' : 'bg-muted'
-                }`} />
-                <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
-                  run?.awaiting ? 'bg-accent' : run?.status === 'approved' ? 'bg-[#34c759]' : 'bg-muted'
-                }`} />
-              </span>
-              <h3 className="text-[16px] font-semibold text-ink dark:text-white">
-                {run?.awaiting
-                  ? 'Gate Decision Required'
-                  : run?.status === 'approved'
-                  ? 'Pipeline Completed & Approved'
-                  : run?.status === 'cancelled'
-                  ? 'Run Cancelled'
-                  : (run?.step && run.step !== 'req') || run?.started
-                  ? 'Agent Working'
-                  : 'Workflow Ready to Run'}
-              </h3>
-              <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                run?.awaiting
-                  ? 'bg-accent/15 dark:bg-accent/25 text-accent dark:text-[#409cff]'
-                  : run?.status === 'approved'
-                  ? 'bg-[#34c759]/15 dark:bg-[#34c759]/25 text-[#17692e] dark:text-[#34c759]'
-                  : run?.status === 'cancelled'
-                  ? 'bg-[#ff3b30]/15 dark:bg-[#ff3b30]/25 text-[#d70015] dark:text-[#ff453a]'
-                  : 'bg-black/[0.04] dark:bg-white/[0.08] text-muted dark:text-[#a1a1aa]'
-              }`}>
-                {run?.awaiting ? `Awaiting ${run?.gate || 'Review'}` : run?.status || 'idle'}
-              </span>
-            </div>
-            <p className="mt-1 text-[13px] text-muted dark:text-[#a1a1aa]">
-              {run?.awaiting
-                ? `Role "${run?.gate || 'Reviewer'}" must approve or request rework to advance the pipeline.`
-                : run?.status === 'approved'
-                ? 'All phases approved and verified against cryptographic audit ledger.'
-                : run?.status === 'cancelled'
-                ? 'This run was cancelled. A cancelled run cannot be reopened.'
-                : (run?.step && run.step !== 'req') || run?.started
-                ? 'The agent is working on this step. The next gate opens when it hands its work over.'
-                : 'Click Start Pipeline to begin agent reasoning, testing, and approval gates.'}
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2.5">
-            {run?.awaiting ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onRequestRework}
-                  className="rounded-xl border border-black/[0.08] dark:border-white/[0.1] bg-black/[0.03] dark:bg-white/[0.06] hover:bg-black/[0.06] dark:hover:bg-white/[0.1] px-4 py-2 text-[12.5px] font-semibold text-ink dark:text-[#f5f5f7] transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <RotateCcw size={13} className="text-muted dark:text-[#a1a1aa]" />
-                  <span>Request Rework</span>
-                </button>
-                {approveBlocked && (
-                  <span role="note" className="text-[12px] font-medium text-[#d70015] dark:text-[#ff453a]">
-                    {approveBlocked}. Approve is disabled.
-                  </span>
-                )}
-                <button
-                  type="button"
-                  disabled={!canAct}
-                  title={approveBlocked || undefined}
-                  onClick={onApprove}
-                  className="rounded-xl bg-[#0071e3] hover:bg-[#0077ed] px-5 py-2 text-[12.5px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
-                >
-                  <span>Approve {run?.gate || 'Gate'} ↗</span>
-                </button>
-              </>
-            ) : run?.status === 'approved' ? (
-              <div className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-[#17692e] dark:text-[#34c759]">
-                <Check size={16} strokeWidth={2.5} />
-                <span>Production Ready</span>
-              </div>
-            ) : run?.step !== 'req' || run?.started ? null : (
-              <button
-                type="button"
-                onClick={() => onStartPipeline && onStartPipeline(run?.id)}
-                className="rounded-xl bg-[#0071e3] hover:bg-[#0077ed] px-5 py-2 text-[12.5px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] flex items-center gap-1.5 cursor-pointer"
-              >
-                <Play size={13} fill="currentColor" />
-                <span>Start Pipeline ▶</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
+      {/* 3. Where the run stands (the decision itself is in the gate banner, F4) */}
+      <RunStatusCard run={run} onStartPipeline={onStartPipeline} />
     </div>
   )
 }

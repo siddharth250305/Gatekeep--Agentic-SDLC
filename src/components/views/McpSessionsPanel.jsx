@@ -52,6 +52,7 @@ export default function McpSessionsPanel({ sessions = [], stats = null, onRefres
               onClick={onRefresh}
               className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.08] text-faint dark:text-[#8e8e93] hover:text-ink dark:hover:text-white transition-colors cursor-pointer"
               title="Refresh MCP sessions"
+              aria-label="Refresh MCP sessions"
             >
               <RefreshCw size={12} />
             </button>
