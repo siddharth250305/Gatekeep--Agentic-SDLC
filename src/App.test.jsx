@@ -2,50 +2,13 @@
 // a signed-in reviewer. Rendered under StrictMode exactly like main.jsx, which
 // mounts, unmounts and re-mounts effects, so a bad effect cleanup (such as
 // returning null) crashes here just as it does in the browser.
-import { StrictMode } from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
-import run0427 from './test/fixtures/run-0427.json'
 import { FakeWebSocket } from './test/setup.js'
+import { SESSION, json, lastDecision, mockBackend, renderApp, run0427 } from './test/app-harness.jsx'
 
-const SESSION = {
-  token: 'gks_test_session',
-  expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-  user: { id: 1, username: 'adrt25', name: 'Adrian T', role: 'Engineer' },
-}
-
-const json = (status, body) =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
-
-// A fake GateKeep backend. Overrides map a path to a response.
-function mockBackend(overrides = {}) {
-  const routes = {
-    'POST /auth/login': () => json(200, SESSION),
-    'POST /auth/logout': () => json(200, { ok: true }),
-    'GET /health': () => json(200, { ok: true, demoMode: false }),
-    'GET /runs': () => json(200, [{ id: run0427.id }]),
-    [`GET /runs/${run0427.id}`]: () => json(200, run0427),
-    'GET /mcp/sessions': () => json(200, []),
-    'GET /mcp/stats': () => json(200, { total_sessions: 0, active_sessions: 0, total_tool_calls: 0, sessions_by_provider: [] }),
-    'POST /auth/ws-ticket': () => json(200, { ticket: 'tkt_single_use', expiresInMs: 30000 }),
-    [`POST /runs/${run0427.id}/decide`]: () => json(200, { ...run0427, step: 'done', status: 'approved', awaiting: false }),
-    ...overrides,
-  }
-  const fetchMock = vi.fn(async (url, init = {}) => {
-    const key = `${init.method || 'GET'} ${new URL(url).pathname}`
-    return routes[key] ? routes[key](init) : json(404, { error: `no mock for ${key}` })
-  })
-  vi.stubGlobal('fetch', fetchMock)
-  return fetchMock
-}
-
-// api.js reads the stored session when it is imported, so every test loads
-// the app modules fresh.
-async function renderApp() {
-  vi.resetModules()
-  const { default: App } = await import('./App')
-  return render(<StrictMode><App /></StrictMode>)
-}
+// The one gate banner (F4) holds the Approve and Request changes buttons.
+const banner = () => screen.findByRole('region', { name: 'Gate status' })
 
 let consoleError
 beforeEach(() => {
@@ -118,17 +81,11 @@ test('logged in: the dashboard renders the run with the session token attached',
   expect(ticketCall[1].headers.authorization).toBe(`Bearer ${SESSION.token}`)
 })
 
-// The JSON body of the last POST to /decide.
-function lastDecision(fetchMock) {
-  const calls = fetchMock.mock.calls.filter(([url]) => url.endsWith('/decide'))
-  return calls.length ? JSON.parse(calls.at(-1)[1].body) : null
-}
-
 test('approve tells the server which gate the reviewer was looking at (B8)', async () => {
   localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
   const fetchMock = mockBackend()
   await renderApp()
-  const approve = await screen.findByTitle('Approve the current gate')
+  const approve = await within(await banner()).findByRole('button', { name: 'Approve Gate 3' })
   await waitFor(() => expect(approve).toBeEnabled())
   fireEvent.click(approve)
   await waitFor(() => expect(lastDecision(fetchMock)).toEqual({ decision: 'approve', feedback: '', gate: 'g3' }))
@@ -138,12 +95,13 @@ test('at Gate 3, Request Rework lets the reviewer send the work back to Design (
   localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
   const fetchMock = mockBackend()
   await renderApp()
-  fireEvent.click(await screen.findByRole('button', { name: /Request Rework/ }))
+  fireEvent.click(await within(await banner()).findByRole('button', { name: 'Request changes' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Request changes' })
   // Code is the default; the reviewer picks Design.
-  expect(screen.getByRole('radio', { name: /Code/ })).toBeChecked()
-  fireEvent.click(screen.getByRole('radio', { name: /Design/ }))
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'rethink the cache' } })
-  fireEvent.click(screen.getByRole('button', { name: /Send Feedback to Agent/ }))
+  expect(within(dialog).getByRole('radio', { name: /Code/ })).toBeChecked()
+  fireEvent.click(within(dialog).getByRole('radio', { name: /Design/ }))
+  fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'rethink the cache' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: /Send Feedback to Agent/ }))
   await waitFor(() => expect(lastDecision(fetchMock)).toMatchObject({ decision: 'reject', gate: 'g3', target: 'design' }))
   expect(lastDecision(fetchMock).feedback).toContain('rethink the cache')
 })
@@ -156,7 +114,8 @@ test('before Gate 3 the rework window has no target choice', async () => {
   }
   const fetchMock = mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, atGate2) })
   await renderApp()
-  fireEvent.click(await screen.findByRole('button', { name: /Request Rework/ }))
+  fireEvent.click(await within(await banner()).findByRole('button', { name: 'Request changes' }))
+  await screen.findByRole('dialog', { name: 'Request changes' })
   expect(screen.queryByRole('radio')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: /Send Feedback to Agent/ }))
   await waitFor(() => expect(lastDecision(fetchMock)).toMatchObject({ decision: 'reject', gate: 'g2' }))
@@ -191,9 +150,10 @@ test('a run with no known step (from before the state machine) cannot be approve
   const legacy = { ...run0427, step: null }
   mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, legacy) })
   await renderApp()
-  const approve = await screen.findByTitle(/Nothing to approve|Approve the current gate/)
   await screen.findAllByRole('button', { name: new RegExp(run0427.id) })
-  expect(approve).toBeDisabled()
+  // The banner explains there is no decision to make, and offers none.
+  expect(await banner()).toHaveTextContent('This run has no known step, so no decision can be made.')
+  expect(screen.queryByRole('button', { name: /^Approve/ })).toBeNull()
 })
 
 test('the dashboard says SHA-256 HMAC now that the chain is HMAC-signed (E1)', async () => {
@@ -216,12 +176,12 @@ test('at Gate 3, Approve is disabled with the reason when the code changed after
   const changed = atGate3With({ fingerprint: 'b'.repeat(64), testRunId: run0427.tests.id, approvable: false, reason: 'code_changed' })
   const fetchMock = mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, changed) })
   await renderApp()
-  // The header button and the Overview gate card both say why.
+  // The one Approve button, in the gate banner, says why.
   const approves = await screen.findAllByTitle(/changed after the last test run/)
   await screen.findAllByRole('button', { name: new RegExp(run0427.id) })
-  expect(approves.length).toBe(2)
+  expect(approves.length).toBe(1)
   for (const button of approves) expect(button).toBeDisabled()
-  expect(screen.getByRole('note')).toHaveTextContent('The code changed after the last test run. Approve is disabled.')
+  expect(within(await banner()).getByRole('note')).toHaveTextContent('The code changed after the last test run. Approve is disabled.')
   for (const button of approves) fireEvent.click(button)
   expect(lastDecision(fetchMock)).toBeNull()
 })
@@ -232,6 +192,7 @@ test('at Gate 3 with no review evidence at all, Approve stays disabled (fail clo
   await renderApp()
   await screen.findAllByRole('button', { name: new RegExp(run0427.id) })
   const approves = await screen.findAllByTitle(/no tested version/i)
+  expect(approves.length).toBe(1)
   for (const button of approves) expect(button).toBeDisabled()
 })
 

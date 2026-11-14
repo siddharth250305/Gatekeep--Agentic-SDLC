@@ -236,6 +236,7 @@ export default function AuditLogView({ runs = [], onOpenRun, activeRun, onTamper
                         <button
                           type="button"
                           onClick={() => handleCopy(block.hash)}
+                          aria-label={`Copy hash of block ${block.seq ?? ''}`.trim()}
                           className="text-faint hover:text-ink ml-1 dark:text-[#8e8e93] dark:hover:text-white"
                         >
                           {copiedHash === block.hash ? <Check size={11} className="text-green dark:text-[#34c759]" /> : <Copy size={11} />}

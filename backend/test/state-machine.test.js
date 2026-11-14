@@ -216,6 +216,42 @@ test('B4: each reject sends the run back to the right step', async () => {
   assert.equal((await phaseStates(db, id)).g3, 'pending')
 })
 
+test('F4: a step sent back for rework does not keep its old completion time', async () => {
+  // Found in the Milestone 2 browser check: after a Gate 3 reject to Design,
+  // Design was active again but still showed the time it was first completed.
+  const db = await freshDb()
+  const id = await newRun(db)
+  const agent = 'mcp'
+  const atOf = async () => Object.fromEntries((await getRun(db, id)).steps.map((s) => [s.key, s.at]))
+
+  await robotAction(db, id, 'submit_requirements', { agent })
+  await decideGate(db, id, { decision: 'approve', user: PLANNER })
+  await robotAction(db, id, 'submit_design', { agent })
+  await decideGate(db, id, { decision: 'approve', user: ENGINEER })
+  await handOver(db, id, { agent })
+  const before = await atOf()
+  for (const key of ['req', 'g1', 'design', 'g2', 'code']) assert.ok(before[key], `${key} has a completion time`)
+
+  assert.ok((await decideGate(db, id, { decision: 'reject', target: 'design', user: ENGINEER })).run)
+  const after = await atOf()
+  // Steps that are open again (or not reached yet) have no completion time.
+  assert.equal(after.design, null)
+  assert.equal(after.g2, null)
+  assert.equal(after.code, null)
+  // Finished steps keep theirs; the gate that sent the work back shows when it did.
+  assert.equal(after.req, before.req)
+  assert.equal(after.g1, before.g1)
+  assert.ok(after.g3)
+
+  // Same for Gate 1 sending requirements back.
+  const id2 = await newRun(db, 'RUN-SM-2')
+  await robotAction(db, id2, 'submit_requirements', { agent })
+  await decideGate(db, id2, { decision: 'reject', user: PLANNER, feedback: 'too vague' })
+  const req = (await getRun(db, id2)).steps.find((s) => s.key === 'req')
+  assert.equal(req.state, 'active')
+  assert.equal(req.at, null)
+})
+
 test('B4: rejecting at Gate 3 needs a target (code or design)', async () => {
   const db = await freshDb()
   const id = await newRun(db)

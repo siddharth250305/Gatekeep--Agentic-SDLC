@@ -65,7 +65,7 @@ Only after Gate 2 is approved can the agent call `apply_patch` or `write_file`. 
 - Counts come from the JUnit XML report pytest writes to a separate mount, never from printed text, so a test that prints `999 passed` changes nothing. Pass/fail also needs exit code 0 and at least one test. Docker being down, a timeout, zero collected tests, or a missing report are reported as "Sandbox unavailable", "Timed out", "No tests ran" or "Failed", never as a pass.
 - Every test run is stored with a **fingerprint** (SHA-256) of the exact code it ran on.
 - When the code is ready, the agent calls `request_approval`. The workspace is **frozen** (no more writes), and the run moves from Code to **Gate 3**, a real human step for an Engineer, carrying the fingerprint of the handed-over code.
-- At Gate 3 the reviewer inspects the side-by-side git diff in the web dashboard, leaves line-level comments if needed, and either approves (the run is **Done**) or sends the work back to **Code** or to **Design** (which lifts the freeze). The person who asked for the run cannot give this final approval. **Approve only works on the exact tested version:** if the code changed after the last test run, or that run did not pass, Approve is disabled with the reason and the server refuses it. The approval's audit entry records the fingerprint and the test run ID.
+- At Gate 3 the reviewer sees three columns on one screen: the approved requirements with the test results, the code diff, and the approved design with the list of changed files. They leave line-level comments if needed (every line has a keyboard-reachable comment button), and either approve (the run is **Done**) or sends the work back to **Code** or to **Design** (which lifts the freeze). The person who asked for the run cannot give this final approval. **Approve only works on the exact tested version:** if the code changed after the last test run, or that run did not pass, Approve is disabled with the reason and the server refuses it. The approval's audit entry records the fingerprint and the test run ID.
 
 ### One state machine decides every step change
 The Node backend owns run state ([ADR 0001](docs/adr/0001-node-owns-run-state.md)). Every step change goes through one fixed table of allowed moves (`backend/src/runs/machine.js`):
@@ -82,6 +82,8 @@ The Node backend owns run state ([ADR 0001](docs/adr/0001-node-owns-run-state.md
 | Done or Cancelled | anything | refused | Nobody |
 
 Any move not in the table is refused, and an unknown step refuses everything. An Admin may act for any human role. Each move locks the run, and writes exactly one audit entry with the logged-in name and the server's clock, in one database transaction. Pressing Approve twice, or a robot sending the same submission twice, never moves the run twice. There is no other way to change a run's step: the old `PATCH /runs/:id` route is gone, phase rows accept metrics only, and agents cannot write approval or step events into the audit log.
+
+In the dashboard, one **gate banner** on every page says which gate the run is at (for example "Gate 2 of 3: Design review"), who must act, and who you are signed in as, with the only Approve and Request changes buttons. When the server would refuse the click (wrong role, the requester at Gate 3, or code changed after the last test run) the button is disabled and the banner says why. Request changes lets the reviewer pick the step at Gate 3 (Code or Design) and sends only this gate's comments written since its last decision. A step sent back for rework does not keep its old completion time.
 
 ---
 
@@ -196,7 +198,7 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 | Test / Metric | Result | What it Means |
 | :--- | :--- | :--- |
-| **Automated Test Suite** | **293 Python + 156 Node + 18 dashboard passing** | Counts are collected test cases (parametrized cases count separately). The 156 Node tests run on a real Postgres (`npm run test:pg`); 7 of them need real locking and are skipped under the in-memory `npm test`. Includes 3 real Docker sandbox tests. |
+| **Automated Test Suite** | **293 Python + 157 Node + 67 dashboard passing** | Counts are collected test cases (parametrized cases count separately). The 157 Node tests run on a real Postgres (`npm run test:pg`); 7 of them need real locking and are skipped under the in-memory `npm test`. Includes 3 real Docker sandbox tests. |
 | **Sensitive File Access** | **Blocked, including through shortcuts** | One block list (`.env*`, keys, `id_*`, credential files, `*.tfstate`, `.ssh/`, `.aws/`, `.git/`, ...). Every tool (read, write, search, file list, repository context) checks the real file behind a symlink, and refuses shortcuts to blocked files or outside the workspace. Secret files are removed from the sandbox copy before tests run. |
 | **Secret Redaction** | **Every output** | File reads, search results, diffs, repository context and test output have secret values replaced with `***`: whole private-key blocks, known token formats, and `key = "value"`, `KEY=value` and `key: value` lines. Search matches on the redacted text, so it cannot confirm a secret value. Pattern-based: an unusual secret format can still slip through. |
 | **Path Traversal Protection** | **Blocked** | `..` segments (with `/` or `\`) are rejected by the policy engine, and every resolved path must stay inside the run workspace. |
@@ -204,7 +206,7 @@ I tested GateKeep against automated test suites and common attack vectors:
 | **Approval Integrity** | **Exact tested version** | Gate 3 approval is bound to the code fingerprint and the test run ID; the workspace is frozen while review is pending. |
 | **Network Isolation** | **No network** | The Docker sandbox runs with `--network none`, no Linux capabilities, a read-only code mount and capped memory, CPU, processes and `/tmp`. |
 | **Audit Ledger Verification** | **HMAC + sealed head** | Edited rows (even with recomputed SHA-256), copied rows and deleted newest rows are detected. See the limits in the Audit Ledger section above. |
-| **Live Telemetry Latency** | **< 100 ms** | Agent tool calls and test outputs appear on the React dashboard in real time over WebSockets. |
+| **Live Telemetry Latency** | **< 100 ms** | Agent tool calls and test outputs appear on the React dashboard in real time over WebSockets. A burst of events causes one reload; a dropped connection retries after 1, 2, 4 ... up to 30 s and reloads once when it is back. |
 | **Frontend Build Time** | **~1.1 seconds** | Vite bundles 1,900 modules cleanly with zero warnings. |
 
 ---
@@ -325,9 +327,14 @@ gatekeeper/
 │   │   ├── db.js            # PostgreSQL connection pool & schema migration
 │   │   └── runs/            # Run routes, state machine, test runs, seeds
 ├── src/                     # React 18 review dashboard
-│   ├── components/          # Pipeline stepper, diff viewer, status pills, modals
-│   ├── components/views/    # Overview, Specs & Design, Code Review, Tests, Audit
-│   ├── App.jsx              # Main dashboard container & theme switcher
+│   ├── components/          # Gate banner, accessible dialog, rework and new-run dialogs
+│   ├── components/layout/   # Header, page tabs, footer
+│   ├── components/views/    # Overview, Specs & Design, Tests, Audit
+│   ├── components/code-review/ # Gate 3 page: requirements, diff, design columns
+│   ├── components/specs/    # Requirements and design renderers, review notes
+│   ├── lib/                 # gate.js (gate rules the banner mirrors), diff and markdown parsers
+│   ├── hooks/               # theme, debounced refresh, run actions
+│   ├── App.jsx              # State, live updates and page routing
 │   └── index.css            # Apple HIG theme system with light and dark modes
 ├── scripts/                 # Development helper scripts (dev.sh)
 ├── docs/                    # MCP integration guide and architecture notes

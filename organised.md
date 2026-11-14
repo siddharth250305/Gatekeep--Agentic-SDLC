@@ -543,12 +543,12 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [x] E1 HMAC
 
 **Milestone 4: Clear reviewer experience**
-- [ ] G2 Split big files
-- [ ] F4 Gate banner
-- [ ] F6 Rework target step
-- [ ] F8 Live update fixes
-- [ ] F7 Accessibility
-- [ ] F5 Gate 3 page (part 1)
+- [x] G2 Split big files
+- [x] F4 Gate banner (also: Approve disabled for wrong role / requester at Gate 3, stale step times cleared)
+- [x] F6 Rework target step
+- [x] F8 Live update fixes
+- [x] F7 Accessibility
+- [x] F5 Gate 3 page (part 1): requirements + tests, diff, design + changed files on one screen. Part 2 (requirement links, planned-vs-changed warnings) stays in Milestone 6.
 
 **Milestone 5: Architecture cleanup**
 - [ ] G9 Pipeline mode decision

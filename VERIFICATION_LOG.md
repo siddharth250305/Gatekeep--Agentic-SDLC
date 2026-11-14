@@ -526,3 +526,125 @@ A real backend on a throwaway Postgres database (`gatekeep_m3_live`) with its ow
 - Encoded secrets in test output cannot be caught by pattern redaction.
 - Test runs (`test_runs` rows) are not covered by the audit chain, so a database attacker could forge one. The approve audit entry records which test run and fingerprint were used.
 - No Python lint run: `ruff` is not installed on this machine.
+
+---
+
+## Milestone 4: Clear Reviewer Experience
+
+**Status:** Completed and verified (including the live browser check)
+**Branch:** `fix/milestone-4-reviewer-experience`
+
+### Dependency gate
+
+| Item | Needs | Prerequisite state |
+|---|---|---|
+| G2 | F1, F2, F3, G1 | `[x]` Milestone 0, verified |
+| F4 | B3 | `[x]` Milestone 2, verified (real Gate 3) |
+| F6 | B4 | `[x]` Milestone 2, verified (rework loop) |
+| F8 | none | |
+| F7 | G2 | built in this milestone, before F7 |
+| F5 part 1 | B3, G2 | both done (I2, I3 are only needed for part 2, Milestone 6) |
+
+### Items summary
+
+| ID | Problem fixed | Test name(s) verifying the fix | Status |
+|---|---|---|---|
+| **G2** | `App.jsx` 868 → 375 lines, `CodeReview.jsx` 981 → 148, `SpecsDesignView.jsx` 868 → 107. New focused files: `components/layout/*` (header, menus, tabs, footer), `components/code-review/*` (bar, tabs, diff, dialogs, two side columns, highlighter), `components/specs/*` (markdown blocks, design cards, gate badge, panels, review notes), `components/{GateBanner,Dialog,NewRunDialog}.jsx`, `lib/{gate,diff,markdown}.js`, `hooks/*`. `OverviewDashboardView.jsx` was also over 400 after the split rules were applied, so its status card moved to `RunStatusCard.jsx`. Largest component file now: 375 lines. | `src/milestone4.test.jsx::no React component file is longer than 400 lines (G2)` (reads every `.jsx` source); all earlier dashboard tests still pass | Verified |
+| **F4** | One gate banner under the header on every page: "Gate N of 3: …", "Waiting for: role", "You are: role (name)", the only Approve / Request changes buttons, and an "Open the …" link to the page where that gate is reviewed (Gate 2 opens Specs on the Design sub-page). Rules live in one place, `lib/gate.js` `gateView()`, mirroring `backend/src/runs/machine.js`: wrong role disables both buttons (Admin may act for any role); the requester at Gate 3 cannot approve but can request changes; B7 evidence still blocks Approve. The duplicate Approve buttons in the header, the Overview card and the Code Review side panel were removed. **Backend:** `setPhase` clears the time of a step that becomes active or pending again, so a step sent back for rework no longer shows its old completion time. | `src/milestone4.test.jsx::every page shows which gate is active, who must act, who you are, and the actions (F4)`, `::the banner names Gate 1 and Gate 2 the same way`, `::approving from the banner tells the server which gate the reviewer saw`, `::the wrong role sees Approve and Request changes disabled, with the reason`, `::an Admin may act for any gate role`, `::the person who asked for the work cannot give the final approval, but can request changes`, `::code changed after the last test run: Approve is disabled in the banner`, `::while the agent works the banner says so and offers no decision`, `::a finished run says so in the banner`, `::the banner opens the page to review for the current gate`, `::a double click on Approve sends one decision`; `src/lib/gate.test.js::Gate 1: a Planner may decide, an Engineer may not`, `::an Admin who asked for the work still cannot give the final approval`; `backend/test/state-machine.test.js::F4: a step sent back for rework does not keep its old completion time` | Verified |
+| **F6** | `ReworkModal` (on the shared `Dialog`): Gate 3 offers Code or Design; Gates 1 and 2 state their one fixed target. Only comments of this gate's phase written after the gate's last decision (`gN.rejected` or `gN.approved` in the audit chain) are listed and sent, so old rounds and other steps are never re-sent; a comment with no readable time is kept and shown, not dropped. The window mounts fresh on every open (empty box after sending) and stays open with the text kept when the server refuses. | `src/milestone4.test.jsx::only this step's new comments are listed and sent, never older rounds or other steps (F6)`, `::at Gates 1 and 2 the window says where the work goes back to`, `::at Gate 3 the reviewer chooses Code or Design`, `::the feedback box is empty again after sending`, `::if the server refuses, the window stays open and keeps what was typed`, `::clicking outside the rework window does not throw away typed guidance`; `src/lib/gate.test.js::a gate revisited after being approved does not re-send the notes of the round it approved`, `::a comment without a readable time is kept and shown` | Verified |
+| **F8** | `connectRealtime` retries after 1, 2, 4, 8, 16, 30, 30 … s, resets to 1 s after a good connection, and calls `onReconnect` whenever a connection opens after a failed or dropped one (also when the API was down at page load). The app reloads through a debounced call (250 ms, at most every 1 s under a steady stream), cancelled on sign-out. Every reload is numbered and an older answer that arrives late is dropped. A failed reload keeps the last good data on screen with "API offline". | `src/api.test.js::each failed reconnect waits twice as long, up to 30 seconds (F8)`, `::a good connection resets the wait, and only a reconnect (not the first connect) asks for a reload`, `::if the server was down when the page opened, the first successful connection also reloads`, `::after stop() nothing reconnects`; `src/hooks/useDebouncedCallback.test.jsx::a steady stream of calls still runs at least every maxWait`; `src/milestone4.test.jsx::a burst of live events reloads the runs once, not once per event (F8)`, `::after the live connection comes back, the runs are reloaded once to catch up`, `::a failed reload keeps the last good data and the open rework window`, `::an older reload that answers late never overwrites a newer one`, `::signing out right after a live event does not show a false "session expired"` | Verified |
+| **F7** | Shared `Dialog`: `role="dialog"`, `aria-modal`, named; focus moves in (a `data-autofocus` field first), Tab / Shift+Tab stay inside, Esc closes, focus returns to the opener. Used by Request changes, New Run, Quick Open and Full view. Header popups close with Esc and are plain disclosure buttons (no half-built ARIA menu roles). Line comment buttons are always visible (faint until hover or keyboard focus) and in the tab order; removed and added lines with the same number get distinct labels and their own comment box; placeholder lines get no button. Open-file tabs are real buttons; every icon-only button has a name. `select-none` removed from the app shell (kept only on line numbers and decorative tree glyphs, so copied code is clean). ⌘P does not open behind another dialog. | `src/milestone4.test.jsx::dialogs take focus, keep Tab inside, close with Esc and give focus back (F7)`, `::the New Run dialog closes with Esc`, `::the Code Review dialogs (quick open, full view) close with Esc`, `::every button on every page, and in the dialogs, has an accessible name`, `::line comment buttons are always reachable by keyboard, not only on mouse hover`, `::run IDs, hashes and code can be selected and copied`, `::a dialog with an autofocus field still gives focus back to its opener on Esc`, `::Shift+Tab from the dialog itself stays inside the dialog`, `::Cmd+P does not open the file finder behind another dialog`, `::header popups are plain disclosure buttons`, `::the New Run dialog opens with the cursor in the Brief field`, `::a removed and an added line with the same number have their own comment buttons`, `::a run with no code changes offers no comment button on the placeholder line` | Verified |
+| **F5 (part 1)** | The Code Review page is three columns: left, the requirements (with the Gate 1 badge) and the test results (outcome, counts, every test marked new or existing); middle, the open-file tabs and diff; right, the design (Gate 2 badge, file plan, threat model, other sections) and the changed-files list, which opens a file in the diff. Empty states say so. The tabs follow the run when a rework replaces its files. | `src/milestone4.test.jsx::Gate 3 shows the approved requirements, the code changes and the approved design together (F5)`, `::the Gate 3 columns say so when there is nothing approved to show`, `::when a rework replaces the changed files, the tabs follow the new files`, `::Code Review never invents a repository or branch name` | Verified |
+
+### Test-first evidence (T1)
+
+The user asked to see this report before any commit, so RED/GREEN evidence is kept here instead of checkpoint commits.
+
+| Round | RED (before the fix) | GREEN (after) |
+|---|---|---|
+| Milestone items | Backend: `F4` test failed (`actual: 'Nov 14, 08:24 UTC', expected: null`). Dashboard: **34 failed / 13 passed** of 47: no "Gate status" region, no dialogs, `select-none` on the root, `opacity-0` comment buttons, `[['/src/App.jsx', 869], …]` over 400 lines, 7 run-list reloads instead of 3 for a burst, no backoff (`expected 1 to be 2`), no three-column regions. | 47/47, backend 1/1 |
+| ECC code-reviewer findings | 5 failed: revisited gate re-sent old notes (`['old-design','new-design']`), no-time comment dropped, no catch-up when the API was down at load, backdrop click discarded guidance, invented `commerce-core` / `main`. | 55/55 |
+| ECC react-reviewer findings | 9 failed: focus not returned after an autofocus dialog (`<body>`), Shift+Tab escaped from the dialog itself, a failed reload unmounted the rework window, a late old reload put the banner back to Gate 3, a false "session expired" after sign-out, a double click sent 2 decisions, ⌘P opened behind a dialog, `role="menu"` present, stale tabs after files were replaced. | 64/64 |
+| Live browser check findings | 3 failed: New Run focus landed on Close (StrictMode double effect undid `autoFocus`), duplicate "Comment on line 15" labels (and one click opened two boxes), a comment button on the "No code changes" placeholder. | 67/67 |
+
+Guard tests that passed before any fix (they pin behaviour that was already right): `after stop() nothing reconnects`, `Gate 1: a Planner may decide, an Engineer may not`, `an Admin who asked for the work still cannot give the final approval`, `a steady stream of calls still runs at least every maxWait`.
+
+Order note: the shared `Dialog` (F7) and the Gate 3 columns (F5) were written while splitting `CodeReview.jsx` / `App.jsx` (G2), so the extracted dialogs and panels were not written twice. Their RED tests were already in place and failing before any of it.
+
+Test corrections made while going GREEN (the code was not changed for these):
+- `App.test.jsx`: the existing approve / rework tests now use the banner, and the two B7 tests expect **one** Approve button instead of two (header + Overview), because a single place to decide is the point of F4. The harness moved to `src/test/app-harness.jsx`, shared with the new tests.
+- The hash check used 12 characters; the Audit page shows hashes as first 8 … last 6, so it now looks for 8.
+- The late-reload test first counted calls, but StrictMode loads twice at start; it now switches on a phase instead.
+- The New Run focus test now focuses the button before clicking (a real click does, `fireEvent.click` does not); the placeholder test reads the region text (the highlighter splits it into spans).
+
+### "Done when" acceptance verification
+
+| # | Criterion | Automated proof | Live proof (browser) |
+|---|---|---|---|
+| 1 | On any page a reviewer sees within 5 seconds which gate, who must act, what to click | banner tests on all 5 pages; wrong-role, requester, Admin, agent-working, done | Banner read "Gate 3 of 3: Code review · Waiting for: Engineer · You are: Engineer (Eli Engineer)" with Approve Gate 3 / Request changes on Overview, Specs and Code Review; as Pat (Planner) at Gate 2 both buttons disabled with "Only an Engineer can decide Gate 2. You are signed in as Planner. Approve and Request changes are disabled." |
+| 2 | Gate 3 shows requirements, design and diff on one screen | `Gate 3 shows the approved requirements, the code changes and the approved design together (F5)` | Screenshot at 1600 px: left "Requirements · Approved by Planner" (AC-1…AC-4, 4 tests marked Existing/New), middle diff, right "Design · Approved by Engineer" (file plan, threat model, 6 changed files) |
+| 3 | No component file longer than about 400 lines | G2 test over every `.jsx` | Largest: `App.jsx` 375 lines |
+| 4 | All dialogs close with Esc, comment buttons keyboard-reachable, text selectable | F7 tests above | Real keys: Esc closed Request changes and New Run and returned focus to their buttons; Shift+Tab from Close went to "Send Feedback to Agent", Tab wrapped back; focused "Comment on line 13" + Enter opened the box, typed, saved ("Review comment recorded"); `getSelection()` over the code line returned `class RateLimiter:` and over the header `RUN-0427` |
+
+### Review findings (ECC code-reviewer and ECC react-reviewer)
+
+Code reviewer: 0 critical, 0 high, 2 medium, 6 low, plus test gaps. React reviewer: 0 critical, 1 high, 5 medium, 7 low. Several overlap.
+
+| Finding | Result |
+|---|---|
+| React H1: focus not restored after a dialog with an autofocus field | **Fixed** (opener read on first render). Test added. |
+| Code M1 / React L9: no catch-up reload when the API was down at page load | **Fixed** (`onReconnect` after any failed or dropped connection). Test added. |
+| Code M2 / React M5: a revisited gate re-sent notes from the round it approved | **Fixed** (round starts at the gate's last approve or reject). Test added. |
+| React M2: one failed reload wiped the runs and the open rework window | **Fixed** (keep last good data, show "API offline"). Test added. |
+| React M3: an older reload answering late overwrote a newer one | **Fixed** (numbered reloads). Test added. |
+| React M4: debounced reload after sign-out showed a false "session expired" | **Fixed** (cancel on sign-out, ignore expiry when signed out). Test added. |
+| React M6: double click sent two decisions; toasts cleared each other | **Fixed** (buttons wait while a decision is in flight; one toast timer). Test added. |
+| Code L3: a comment with no time was silently dropped after a rework | **Fixed** (kept and shown). Test added. |
+| Code L4: Code Review invented `commerce-core` / `main` / `HEAD` | **Fixed** ("Unknown repository" / "Unknown branch", fake branch row removed). Test added. |
+| Code L5: dead `approvalBlockReason` re-export in `App.jsx` | **Fixed** (removed). |
+| Code L7: review-notes hint promised every note is sent | **Fixed** (says notes go with this phase's gate). |
+| Code L8 / React L7: backdrop click discarded typed text; Shift+Tab from the dialog escaped; Esc during sending | **Fixed** (backdrop ignored while the rework box has text; trap covers the dialog itself; Esc ignored while sending). Tests added for the first two. |
+| React L8: ⌘P opened the finder behind another dialog | **Fixed.** Test added. |
+| React L10: `role="menu"` without menu keyboard behaviour | **Fixed** (plain disclosure buttons with `aria-expanded`). Test added. |
+| React L12: tabs went stale when a rework replaced files with the same count | **Fixed** (effect follows the file paths). Test added. |
+| Code L6: Overview status card still words gate state itself (parallel to `gateView`) | **Not changed.** It only describes the run; all decisions are in the banner. Left as a small duplication. |
+| React L11: "Open the design" while already on Specs remounts it and drops an unposted note draft | **Not fixed (leftover).** |
+| React L13: the Gate 3 side columns are hidden below the `lg` breakpoint | **Not fixed (leftover).** Phones and narrow windows see the diff only; Specs and Test Results still have the same content. |
+| React: no ESLint config, so `react-hooks` rules are not enforced | **Noted.** Not set up in this milestone. |
+
+### Automated test suite totals (final)
+
+| Test suite | Result | Details |
+|---|---|---|
+| **Python (`cd agents && .venv/bin/pytest`)** | **293 passed, 0 failed** | No Python code changed in this milestone. |
+| **Node, in-memory (`cd backend && npm test`)** | **150 passed, 0 failed, 7 skipped** | The 7 skipped need real Postgres |
+| **Node, real Postgres (`npm run test:pg`, with `--experimental-test-coverage`)** | **157 passed, 0 failed** | +1 (F4 step times). All files 96.73% lines / 89.47% branches. |
+| **Dashboard (`npm test`, Vitest)** | **67 passed, 0 failed** (6 files) | `App.test.jsx` 15, `milestone4.test.jsx` 40, `api.test.js` 4, `lib/gate.test.js` 4, `SpecsDesignView.test.jsx` 3, `useDebouncedCallback.test.jsx` 1 |
+| **Frontend build (`npm run build`)** | **Built cleanly** | 1,932 modules |
+
+### Live check (ECC Chrome DevTools, real Chrome)
+
+A throwaway stack: backend on `:4041` with its own database (`gatekeep_m4_live`, seeded) and audit key, Vite on `:5182`, users `eli` (Engineer), `pat` (Planner), `ada` (Admin), and a robot token. All of it was stopped and the database dropped afterwards. DevTools was first blocked by an old automation Chrome holding its profile; the user freed it.
+
+| Check | Observed in the browser |
+|---|---|
+| Banner + Gate 3 layout (RUN-0427, as eli) | As in "Done when" 1 and 2 above. |
+| Keyboard comment | Focused "Comment on line 13", Enter, typed, saved through Enter on "Save comment". |
+| Request changes at Gate 3 | Dialog named "Request changes", `aria-modal`, focus inside; listed exactly the one new comment; Code preselected. Esc closed it, focus back on "Request changes". Reopened, picked Design, typed guidance, sent: banner became "Agent working: Design · Waiting for: Agent", no decision buttons. |
+| Audit entry and step times (API read-back) | `g3.rejected` by `eli`, `to: design`, feedback = that one comment + the guidance. Steps: `design:active:-`, `g2:pending:-`, `code:pending:-`, `g3:rejected:Nov 14, 08:52 UTC` (old times cleared, F4). |
+| Live update | Robot `submit_design` via the API: the open page switched to "Gate 2 of 3: Design review" with no reload. "Open the design" opened Specs on Phase 2. Request changes at Gate 2: "Sends the work back to: Design", no radios, 0 comments (the Gate 3 code note was not re-sent). |
+| Wrong role | Signed out (no false "session expired"), in as `pat`: both buttons disabled with the reason in the tooltip and the banner. |
+| Requester | `eli` created RUN-1003, driven to Gate 3 through the API (robot token, `pat` approved Gate 1, test run + review with a fingerprint). The server answered `403 requester` to eli's approve. In the browser as eli: Approve disabled, "You asked for this work, so someone else must give the final approval. Approve is disabled.", Request changes enabled. |
+| New Run dialog | After the fix: cursor in Brief; Esc closed it and focus returned to "New run". |
+| F8 reconnect | API stopped for ~20 s: ticket requests at 15.0 s, 17.0, 21.0, 29.0, 45.0 (+1, +2, +4, +8, +16 s); the one after the restart succeeded and exactly one `/runs` reload followed at 45.3 s. Bursts of live events after each action caused one extra reload each. |
+| Console | Only `ERR_CONNECTION_REFUSED` ×4 during the deliberate outage. |
+
+**Bugs found in the browser check and fixed (test first):** New Run focus landed on Close instead of Brief; removed/added lines with the same number shared a comment label and one click opened two boxes; the "No code changes" placeholder had a comment button. See the T1 table.
+
+### Known leftovers (not blocking)
+
+- React L11 and L13 above (Specs draft lost on the banner link while already on Specs; Gate 3 columns desktop-only).
+- Seeded demo runs have a requester name but no user id, so the server does not apply the requester rule to them while the banner (comparing usernames) does. The banner is stricter there, never looser.
+- The faint comment button gets full opacity on `:focus-visible`; a focus set by script kept it faint (0.3) in Chrome. Keyboard Tab was not separately timed in the live check.
+- No ESLint config in the repo.
+- `agents/tests/test_agent_context.py` had an uncommitted change before this milestone began (freeze marker cleanup); it was left untouched.

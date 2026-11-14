@@ -104,16 +104,30 @@ export const api = {
   getMcpStats: () => call(`/mcp/stats`).then(json),
 }
 
+// Reconnect waits 1 s, 2 s, 4 s ... up to 30 s, and starts again from 1 s
+// once a connection succeeds (F8).
+const RETRY_FIRST_MS = 1000
+const RETRY_MAX_MS = 30000
+
 // Live updates. Calls onMessage({ type, runId }) on each broadcast.
 // Browsers cannot send headers on a WebSocket, so each connection first asks
 // for a single-use ticket; the session token never goes in the URL.
-export function connectRealtime(onMessage) {
+// onReconnect() runs each time a connection opens after a failed or dropped
+// one (also when the server was down when the page opened), so the app can
+// reload once and catch up on the updates it missed while offline.
+export function connectRealtime(onMessage, { onReconnect } = {}) {
   let ws
   let closed = false
   let retry
+  let attempt = 0
+  let missedUpdates = false
   const url = BASE.replace(/^http/, 'ws')
   const reconnect = () => {
-    if (!closed) retry = setTimeout(open, 1500)
+    if (closed) return
+    missedUpdates = true
+    const wait = Math.min(RETRY_FIRST_MS * 2 ** attempt, RETRY_MAX_MS)
+    attempt++
+    retry = setTimeout(open, wait)
   }
   const open = async () => {
     let ticket
@@ -124,6 +138,11 @@ export function connectRealtime(onMessage) {
     }
     if (closed) return
     ws = new WebSocket(`${url}/?ticket=${encodeURIComponent(ticket)}`)
+    ws.onopen = () => {
+      attempt = 0
+      if (missedUpdates) onReconnect?.()
+      missedUpdates = false
+    }
     ws.onmessage = (e) => {
       try {
         onMessage(JSON.parse(e.data))
