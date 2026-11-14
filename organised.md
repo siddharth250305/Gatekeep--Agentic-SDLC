@@ -551,10 +551,10 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [x] F5 Gate 3 page (part 1): requirements + tests, diff, design + changed files on one screen. Part 2 (requirement links, planned-vs-changed warnings) stays in Milestone 6.
 
 **Milestone 5: Architecture cleanup**
-- [ ] G9 Pipeline mode decision
-- [ ] G6 Non-blocking Python server
-- [ ] G7 `apply_patch` fixes
-- [ ] G8 Session expiry
+- [x] G9 Pipeline mode decision (kept: one `GateKeepTools` core, MCP and pipeline as two thin adapters; pipeline keeps no run state)
+- [x] G6 Non-blocking Python server
+- [x] G7 `apply_patch` fixes
+- [x] G8 Session expiry
 
 **Milestone 6: Features that beat other tools**
 - [ ] I1 Claude Code and Cursor settings

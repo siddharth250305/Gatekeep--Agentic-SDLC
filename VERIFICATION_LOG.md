@@ -648,3 +648,143 @@ A throwaway stack: backend on `:4041` with its own database (`gatekeep_m4_live`,
 - The faint comment button gets full opacity on `:focus-visible`; a focus set by script kept it faint (0.3) in Chrome. Keyboard Tab was not separately timed in the live check.
 - No ESLint config in the repo.
 - `agents/tests/test_agent_context.py` had an uncommitted change before this milestone began (freeze marker cleanup); it was left untouched.
+
+---
+
+## Milestone 5: Architecture Cleanup
+
+**Status:** Completed and verified (including the live restart check and the Chrome check)
+**Branch:** `fix/milestone-5-architecture-cleanup`
+
+### Dependency gate
+
+| Item | Needs | Prerequisite state |
+|---|---|---|
+| G9 | G4, B2 | `[x]` G4 (Milestone 1, ADR 0001) and B2 (Milestone 2, state machine), both verified |
+| G6 | none | |
+| G7 | none | |
+| G8 | none | |
+
+**G9 decision:** pipeline mode is **kept**, as a second thin adapter over the same core as MCP mode (not removed). ADR 0001 step 5 is marked done.
+
+### Items summary
+
+| ID | Problem fixed | Test name(s) verifying the fix | Status |
+|---|---|---|---|
+| **G9** one core | `_policy_gate` left `server.py`. `GateKeepTools.call(session_id, tool, **args)` is the only way into a tool: it type-checks text arguments, reads the run from the backend, runs `PolicyEngine.evaluate` (phase, file rules, unknown tool, finished run), records a refusal as `mcp.policy.denied`, then runs `_tool_<name>`. `server.py` and `graph.py` both call it. | `tests/test_m5_one_core.py` (adapter = `mcp` and `pipeline` for each): `::test_a_write_outside_the_code_step_is_refused_and_audited`, `::test_secret_files_are_refused_even_in_the_code_step`, `::test_path_traversal_is_refused`, `::test_a_move_from_the_wrong_step_is_refused_before_it_reaches_the_backend`, `::test_the_allowed_move_goes_through_the_backend_state_machine`, `::test_nothing_can_act_on_a_cancelled_run`, `::test_an_unknown_tool_is_refused`; `tests/test_mcp_server_tools.py::test_a_tool_is_refused_and_audited_in_a_phase_that_forbids_it[*]`, `::test_the_real_core_runs_a_tool_in_a_phase_that_allows_it[*]` | Verified |
+| **G9** thin pipeline, no run state | `graph.py` rewritten. `Pipeline.work(run_id)` reads the run (via `GateKeepTools.get_run`), does the one robot step the backend says it is at (req / design / code) and hands it over with the same tools as MCP. No `MemorySaver`, no checkpoint DB, no resume locks, no `interrupt()`: LangGraph is compiled without a checkpointer and lives for one call. Rework feedback is read from the backend's audit chain (`rework_feedback`: the last move decides). A run not started by the pipeline (MCP mode) is never touched. Demo runs get an empty git workspace (`init_workspace`) so the code step is identical to a real repo. The reporter now only sends metrics, work events and repository context (dead `action`/`test_run`/`artifacts`/`event`/`NullReporter` removed). | `test_m5_one_core.py::test_a_whole_run_survives_a_restart_at_every_gate` (a new core and pipeline at every step), `::test_the_pipeline_keeps_no_run_state_between_calls`, `::test_gate_1_feedback_reaches_the_agent_from_the_backend_after_a_restart`, `::test_gate_3_feedback_goes_to_the_coding_agent`, `::test_feedback_of_an_approved_round_is_not_sent_again`, `::test_mcp_mode_runs_are_never_touched_by_the_pipeline`, `::test_the_pipeline_waits_while_a_reviewer_decides`, `::test_runs_needing_work_are_started_runs_at_an_agent_step`, `::test_a_step_that_fails_is_recorded_on_the_run`; `tests/test_graph.py` (B1/B2/B4 under the new model), `tests/test_agent_context.py` (real cloned repo) | Verified |
+| **G9** real design (2.7) | `_build_design` removed. Gate 2 reviews the text the model wrote. | `test_m5_one_core.py::test_gate_2_reviews_the_design_the_ai_actually_wrote` | Verified |
+| **G9** Claude `chat()` | `llm.py` has one provider-neutral conversation (user / assistant with tool calls and the provider's raw content / tool results). `AnthropicLLM.chat()` sends tools as JSON Schema, echoes Claude's own content back unchanged, returns all tool results in one user message, runs tools only on `stop_reason == "tool_use"` (not on refusal or max_tokens). Default model `claude-opus-5-5` (the old `claude-3-5-sonnet-20241022` default is retired), server-side refusal fallback on (`fallbacks="default"`). `GeminiLLM.chat()` translates the same conversation and keeps thought signatures. `FakeLLM` writes its code through tool calls, so the offline path is the real loop. Current Claude prices added to `pricing.py`. | `tests/test_m5_llm.py::test_claude_chat_returns_the_tool_calls_it_asked_for`, `::test_claude_chat_sends_back_its_own_turn_and_all_tool_results_in_one_message`, `::test_a_refusal_ends_the_turn_without_running_tools`, `::test_get_llm_picks_claude_when_only_an_anthropic_key_is_set`, `::test_gemini_chat_translates_the_same_conversation`, `::test_claude_writes_the_code_in_pipeline_mode_through_gatekeep_tools`, `::test_tool_calls_with_bad_arguments_are_answered_with_an_error[*]` | Verified |
+| **G9** real self-heal | `self_heal(run_tests, fix)`: a failing run goes back to the coding model with the failing test names and output; its fix is applied through `GateKeepTools` (policy-checked, audited) and the whole suite runs again through `GateKeepTools.run_tests` (each run recorded with its round number), up to 3 rounds. Failing code is still handed to Gate 3, where B7 blocks approval. | `test_m5_one_core.py::test_self_heal_applies_the_ai_fix_and_runs_the_tests_again`, `::test_self_heal_gives_up_after_three_fixes_and_still_hands_over`; `tests/test_selfheal.py` | Verified |
+| **G9** restarts | Python: `main.py` startup recovery asks the backend for started runs at a robot step and queues them. Node: `backend/src/runs/pipeline.js` `recoverPipelineRuns` (called after `server.listen`) wakes `/pipeline/:id/work` for the same runs, with a 5 s timeout per call. `listRuns` returns `step` and `started`. | `backend/test/pipeline-recovery.test.js` (4 tests), `test_m5_nonblocking.py::test_recover_queues_every_run_the_backend_says_needs_work`, `::test_recover_survives_an_unreachable_backend`; live check below | Verified |
+| **G6** | `main.py` endpoints are `async` and answer **202** at once; a `Worker` runs steps on a thread pool, one at a time per run, with an "again" flag so a decision that lands while a step is finishing is never lost. Failed steps are retried after 10 s and 60 s, then left for the next decision or restart. Shutdown does not wait for running steps. MCP server: the SDK (now pinned `mcp>=2.3`; `requirements.txt` still allowed 1.x, where sync tools ran on the event loop) runs tools on worker threads. Unused `langgraph-checkpoint-postgres` / `psycopg` dropped. | `tests/test_m5_nonblocking.py` (11) incl. `::test_start_answers_at_once_while_the_step_runs_in_the_background`, `::test_the_server_stays_responsive_during_a_slow_step`, `::test_wakeups_during_a_step_run_it_once_more_not_once_per_wakeup`, `::test_different_runs_are_worked_on_in_parallel` (barrier), `::test_slow_mcp_tool_calls_do_not_block_each_other` (barrier) | Verified |
+| **G7** | `apply_patch` works on bytes: refuses an empty or whitespace-only `find`, refuses non-UTF-8 / binary files untouched, keeps a UTF-8 BOM, matches and writes CRLF files with CRLF (also in the whitespace-tolerant fallback), keeps a missing final newline. `write_file` writes exact UTF-8 bytes; reads decode UTF-8 explicitly. | `tests/test_m5_apply_patch.py` (14) | Verified |
+| **G8** | Sessions have an idle TTL (`GATEKEEP_SESSION_TTL_SECONDS`, default 3600, sliding on use). An expired session is dropped and ended in the backend; `sweep_expired`, `end_session`; one session per run even for concurrent calls (`session_for_run`, under a lock). `auto_register_startup` removed: startup binds to no run. The pipeline uses one session per call and ends it. | `tests/test_m5_sessions.py` (8), `test_m5_review_fixes.py::test_one_run_gets_one_session_even_when_calls_arrive_together` | Verified |
+
+### Test-first evidence (T1)
+
+The user asked to see this report before any commit, so RED/GREEN evidence is kept here instead of checkpoint commits.
+
+| Round | RED (before the fix) | GREEN (after) |
+|---|---|---|
+| Milestone items | Python: **27 failed, 6 passed, 2 collection errors** of the new M5 tests (`ImportError: cannot import name 'build_pipeline' from 'app.graph'` for `test_m5_one_core.py` / `test_m5_llm.py`; e.g. `b'one\nTWO\nextra\nthree\n' != b'one\r\nTWO\r\nextra\r\nthree\r\n'`, `AttributeError: … no attribute 'Worker'`, `TypeError: … unexpected keyword argument 'ttl_seconds'`). Node: `ERR_MODULE_NOT_FOUND … src/runs/pipeline.js`. | all new M5 Python tests green; Node 3/3 |
+| ECC review findings | Python: **15 failed** (`test_m5_review_fixes.py`): API key in the Gemini URL and in `pipeline.step.failed`, duplicate sessions under concurrent calls, `Worker.shutdown` missing, recovery dying on an unexpected error, model calling un-offered tools, non-string arguments crashing, no untrusted blocks in the coding prompt, refused reports swallowed, self-heal skipping a lost existing test, no retry of a failed step. Node: the hung-pipeline recovery test hung until killed at 30 s. | 15/15; Node 4/4 |
+| Chrome check findings | Python: **6 failed**: a wake-up during a retry wait waited out the 60 s (`assert worker.drain(2)` false), a wake-up with nothing to do opened a session (×3 cases), a session end lost while the backend was down was never sent again. Dashboard: **2 failed**: no warning when the decision reached no agent service. | Python 6/6, dashboard 3/3 (`src/milestone5.test.jsx`) |
+
+Guard tests that passed before any fix (they pin behaviour that was already right): `test_a_search_text_with_windows_endings_matches_a_unix_file`, `test_a_utf8_byte_order_mark_is_kept`, `test_utf8_text_is_written_as_utf8`, `test_write_file_writes_exact_utf8_bytes`, `test_read_file_decodes_utf8_whatever_the_locale`, `test_slow_mcp_tool_calls_do_not_block_each_other` (the installed MCP SDK 2.3 already ran sync tools on threads; the pin makes it a requirement).
+
+Test corrections made while going GREEN (behaviour moved, the tests followed):
+- `test_graph.py`, `test_selfheal.py`, `test_agent_context.py`, `test_pipeline_auth.py` were rewritten for the stateless pipeline (no `start_run` / `resume_run` / `stale_gate`; resume now always queues and the backend's step decides). The B1 "reports work only" checks are kept.
+- `test_mcp_server_tools.py` / `test_mcp_tools.py`: the policy tests now run on a real `GateKeepTools` (the server no longer has a policy of its own); `auto_register_startup` patches removed.
+- `test_mcp_tools_backend.py`: the fake backend's run is at Code by default, because every tool now reads the run; tests that submit requirements or a design set that step; at Gate 3 a write is refused by the phase policy (message checked) before the freeze layer, which the stale-answer test still covers; the sandbox runner is injected instead of patched; `list_runs` also returns `step` and `started`.
+- The first `test_m5_nonblocking.py` timing tests were replaced by Event/Barrier versions after the python-reviewer flagged them as flaky.
+
+### "Done when" acceptance verification
+
+| # | Criterion | Automated proof | Live proof |
+|---|---|---|---|
+| 1 | Both modes run through the same `GateKeepTools` policy check and pass the same state machine and security tests | the 6 adapter tests in `test_m5_one_core.py`, each run for `mcp` and `pipeline` (12 runs), plus the unknown-tool test | Against the live backend, at Gate 3: `server.gatekeep_write_file` and `Pipeline.tool(…, "write_file")` both answered "Tool 'write_file' is not allowed in phase 'g3'. Allowed in: ['code']"; 2 `mcp.policy.denied` entries in the real chain; file untouched |
+| 2 | Pipeline keeps the AI's design, supports `AnthropicLLM.chat()`, really self-heals, keeps no run state | design, Claude and self-heal tests above; `test_the_pipeline_keeps_no_run_state_between_calls` | Run detail showed the model's design text at Gate 2/3; test run "Passed 3/3, iterations 0" from the real `gatekeep-sandbox` image |
+| 3 | Restarting any Python or Node service mid-run leaves no run stuck or forgotten | `test_a_whole_run_survives_a_restart_at_every_gate`, recovery tests (Python and Node) | See live check: Python stopped at Gate 1 and at Gate 2, Node killed 0.3 s into the code step; every time the run moved on by itself after the restart |
+| 4 | `apply_patch` refuses empty search text and keeps line endings; sessions expire; slow calls do not freeze the server | `test_m5_apply_patch.py`, `test_m5_sessions.py`, `test_m5_nonblocking.py` | `/start` answered at once and the step finished in the background (Gate 1 reached in 0.6 s) |
+
+### Review findings (ECC code-reviewer, security-reviewer, python-reviewer)
+
+All three found the same HIGH issue; no CRITICAL. They confirmed the `call()` choke point (no `_tool_` prefix trick, argument collisions refused), the freeze ordering, and that agents cannot forge move events (so `rework_feedback` can trust the chain).
+
+| Finding | Result |
+|---|---|
+| HIGH (all three): the Gemini key was in the request URL; an HTTP error quoted it, and the new `pipeline.step.failed` audit entry (visible to every reviewer, permanent) and the log would store it | **Fixed**: key sent as `x-goog-api-key`; every failure text is passed through `redact_secrets` before it is audited or logged (also `repo.fetch_failed`). Tests added. |
+| MEDIUM (security, code): the pipeline model could call tools it was not offered (`request_approval`, `report_model`, `get_audit_log`, …) | **Fixed**: only the five workspace tools; anything else is answered "not offered". Tests added. |
+| MEDIUM (security): no prompt-injection rule for the coding model | **Fixed**: rule 5 in the coding system prompt; brief, repository files, reviewer feedback and sandbox output are wrapped in `<untrusted>` blocks. Test added. |
+| MEDIUM (security): a non-string argument crashed the step (and the policy checked `str(path)` while the tool used the original) | **Fixed**: `call()` refuses non-text values for text arguments before the policy runs; `_run_tool` also catches `AttributeError`. Tests added. |
+| MEDIUM (python): `SessionManager` had no lock; concurrent calls created duplicate sessions; counter updates could be lost | **Fixed**: lock around the store and counter; `session_for_run` makes find-or-create one step. Test added. |
+| MEDIUM (python): the thread pool was never shut down; a failed `submit` left a run marked running; recovery could die on an unexpected error | **Fixed**: `Worker.shutdown()` (called after the lifespan), `submit` cleans up on failure, recovery catches and logs. Tests added. |
+| MEDIUM (code): a transient model error left the run idle until a restart | **Fixed**: two retries (10 s, 60 s), then wait for the next decision or restart. Test added. |
+| MEDIUM (code): `HttpReporter.audit` / `.phase` never checked the answer, so the only failure signal could be lost silently | **Fixed**: both raise; the pipeline logs a lost report without undoing the work. Test added. |
+| MEDIUM (code): self-heal ignored a run that failed because an existing test went missing | **Fixed**: `failing()` follows the run status (sandbox errors and timeouts excluded). Test added. |
+| MEDIUM (security): duplicate retries across processes | **Documented**: one pipeline process per deployment (`agents/README.md`); the dedupe is in-process. |
+| LOW (code): code-step tokens not metered when the step failed | **Fixed** (`finally`). |
+| LOW (code): recovery fetch had no timeout; non-2xx logged as "not reachable"; test env restore stored `"undefined"` | **Fixed**: 5 s `AbortSignal.timeout`, clearer message, `restoreEnv` helper. Test added for the timeout. |
+| LOW (python): flaky timing tests | **Fixed** (Events / Barriers). |
+| LOW (python): `MEMORY[:-1]` | **Fixed** (`MEMORY_MB`). |
+| LOW (python): pipeline and MCP sessions could share one session in one process | **Not changed**: the pipeline service and the MCP server are separate processes with separate session stores. |
+| LOW (python): `worker` built at import time; loose `Any` types; `sys._getframe` tool-name lookup; Gemini retry sleep | **Not changed (leftover)**. |
+| LOW (security): no size cap on `write_file` content; the whitespace-tolerant patch fallback can replace whole lines; `list_runs` / `get_audit_log` are not scoped per run (predates M5) | **Not changed (leftover)**; changes stay visible in the Gate 3 diff. |
+| LOW (code): every wake-up, even at a gate, opens and ends a backend session (dashboard noise) | **Not changed (leftover)**. |
+
+### Automated test suite totals (final)
+
+| Test suite | Result | Details |
+|---|---|---|
+| **Python (`cd agents && .venv/bin/pytest`)** | **399 passed, 0 failed** | +106 overall: `test_m5_one_core.py` 26, `test_m5_llm.py` 8, `test_m5_nonblocking.py` 11, `test_m5_apply_patch.py` 14, `test_m5_sessions.py` 8, `test_m5_review_fixes.py` 21 (review + Chrome findings), plus the rewritten older files. 1 warning from Starlette (existed before). |
+| **Node, in-memory (`npm test`)** | **154 passed, 0 failed, 7 skipped** | The 7 skipped need real Postgres |
+| **Node, real Postgres (`npm run test:pg`)** | **161 passed, 0 failed** | +4 (`pipeline-recovery.test.js`) |
+| **Dashboard (`npm test`, Vitest)** | **70 passed, 0 failed** (7 files) | +3 `src/milestone5.test.jsx` (the pipeline warning, found in the Chrome check); `App.jsx` 384 lines |
+| **Frontend build (`npm run build`)** | **Built cleanly** | 1,932 modules |
+| **Static checks** | pyright: 0 errors on all changed Python files; ruff (E, F, W, B, UP, SIM, line length 120): `graph.py`, `main.py`, `llm.py` clean | 5 ruff notes left in files outside the three named, all from before this branch (4 long lines in `repository/tools.py` / `sandbox.py`, an intentional E402 in `server.py`). The system prompts were re-wrapped; a check confirmed their text is byte-identical. |
+
+### Live check (throwaway stack)
+
+Backend on `:4051` with its own database `gatekeep_m5_live`, pipeline on `:8079` with `GEMINI_API_KEY=` / `ANTHROPIC_API_KEY=` empty (offline fake model, nothing billed), the real Docker sandbox (`gatekeep-sandbox`). Users `eli`, `erin` (Engineer), `pat` (Planner), one agent token. Stopped and the database dropped afterwards.
+
+| Check | Observed |
+|---|---|
+| Start answers at once | `POST /runs/RUN-M5A/start` returned 200 immediately; the run was at Gate 1 0.6 s later |
+| Python restart at Gate 1 | Pipeline stopped; `pat` approved Gate 1: recorded, answer carried `pipeline: {resumed: false, reason: 'not_running'}`; run stayed at Design. Pipeline started: at Gate 2 1.1 s later (startup recovery) |
+| Node restart mid code step | `eli` approved Gate 2, backend killed 0.3 s later. On restart it logged "woke the pipeline for RUN-M5A"; Gate 3 1.2 s later. The chain shows the first attempt's two `mcp.file.written`, then the recovered attempt's writes, `mcp.tests.run`, `pipeline.coding.completed`, `code.review_requested` |
+| Real evidence | Tests "Passed 3/3, iterations 0"; sandbox `{image: gatekeep-sandbox, network: Disabled, memory: 512 MB, cpu: 1 core, timeout: 30 seconds}` (the old pipeline reported `python:3.12-slim`, which was not the real image); audit chain `verified: true` |
+| One policy for both modes | As in "Done when" 1 |
+| Gate 3 | `pat` (the requester) refused 403; `eli` approved; run `done`, chain verified |
+| Python restart at Gate 2 (second run) | Pipeline stopped, `eli` approved Gate 2 (`not_running` warning), pipeline started: log `recovery: RUN-M5B`, then `pipeline RUN-M5B: {... did: 'code'}`; Gate 3 1.6 s after the restart |
+
+### Chrome check (ECC Chrome DevTools, real Chrome)
+
+A throwaway stack again: backend `:4051` (own database), pipeline `:8079` (offline fake model, real Docker sandbox), Vite `:5183` pointed at `:4051`; every process was started with its PID recorded and stopped by PID. DevTools was not blocked this time.
+
+| Check | Observed in the browser |
+|---|---|
+| New run and start (as `pat`) | New Run dialog created RUN-1000; "Start Pipeline" answered at once and the banner switched to "Gate 1 of 3: Requirements review" by live update |
+| Python restart at Gate 1 | Pipeline stopped (by PID); Approve Gate 1: banner "Agent working: Design" (**finding 1**: the toast said "approved. Gate advanced." with no agent service running). Pipeline started: the open page changed to "Gate 2 of 3: Design review" with no reload; as Planner both buttons disabled with the reason |
+| AI design at Gate 2 (2.7) | Specs → Phase 2 showed the model's own text ("Token-bucket counter in Redis keyed by merchant…") in the design panel |
+| Node restart mid code step (as `eli`) | Approve Gate 2, backend killed 0.2 s later: pipeline log "failed; retry 1 in 10 s" (the new retry). Retry 1 ran while the backend was still down, so retry 2 was set to 60 s; the backend came back and logged "woke the pipeline", but the run only moved after the 60 s wait (**finding 2**) |
+| Gate 3 page | Requirements and design (the model's text, "Approved by Planner / Engineer"), the two files written through `GateKeepTools`, test results "Passed · 3 passed · 0 failed" from the real sandbox, changed-files list |
+| Gate 3 approve | "Run complete · Waiting for: Nobody, all three gates are approved"; chain verified |
+| Session noise | Every wake-up opened and ended a pipeline session, so each decision showed an "External agent session ended" toast (**finding 3**); the attempt that died with the backend left "1 active agent" in the footer |
+| Console | `ERR_CONNECTION_REFUSED` ×4 during the deliberate outage; one 404 for `favicon.ico` |
+
+**Findings fixed (test first) and re-checked in the browser on a second run (RUN-1001):**
+1. The dashboard now reads the backend's `pipeline` warning: "RUN-1001: Decision recorded, but the agent service is not running. The run continues when it starts." (seen live after approving Gate 1 with the pipeline down).
+2. A wake-up now cuts a retry wait short (and so does shutdown). Live: backend killed during the code step, retry 2 waiting 60 s, backend restarted at 14:32:21, run at Gate 3 about 2 s later.
+3. The pipeline looks at the run before opening a session, so a wake-up at a gate, on a finished run or on an MCP-mode run opens none; a session end that failed while the backend was down is sent again on the next contact. Live: RUN-1001 ended with 4 pipeline sessions, all "ended" (one per step, including the attempt that died during the outage).
+
+**Incident during the Chrome check:** the throwaway database gave the runs ids RUN-1000 / RUN-1001, and `agents/workspaces/RUN-1001` already belonged to one of the user's dev runs (Oct 18). The live run added two untracked files (`throttle.py`, `test_throttle.py`) and a freeze marker `.frozen/RUN-1001` to it; that is why Gate 3 showed an "Existing" test `tests/test_basic.py::test_word_count`. All three were removed afterwards (`git status` of RUN-1001 is clean, no freeze marker); RUN-1000 was created by the check and deleted. Future live checks use unique run ids.
+
+### Known leftovers (not blocking)
+
+- The LOW review items marked "not changed" above.
+- A pipeline session that was open when the backend went down is now ended on the next contact, but only if the same pipeline process is still running. If the pipeline process itself restarts, that session stays "active" in `mcp_sessions` (seen in the Chrome check as "1 active agent"). Backend-side expiry of idle sessions would clean it up.
+- Pipeline workspaces live under `agents/workspaces/<run_id>` for every database, so two databases with the same run ids share a workspace (see the incident above). A per-deployment workspace root would prevent it.
+- A step that is retried after a crash starts from the workspace as it was left (files written before the crash stay); the model sees them through its tools.
+- Python coverage is not measured (`pytest-cov` is not installed); the Node coverage run was not repeated for this milestone.
+- During the live check a `pkill -f "node src/server.js"` also stopped the user's own dev backend on `:4040`. It was not restarted, because its audit key comes from the user's shell, not from `.gatekeep.local.env`.
