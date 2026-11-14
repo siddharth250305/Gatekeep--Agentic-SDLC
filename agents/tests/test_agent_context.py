@@ -64,6 +64,7 @@ def test_repository_context_flows_through_the_pipeline(tmp_path):
         assert final["status"] == "approved"
     finally:
         shutil.rmtree(wsdir, ignore_errors=True)
+        (WORKSPACES / ".frozen" / run_id).unlink(missing_ok=True)
 
 
 def test_pipeline_hands_over_the_tested_fingerprint_and_freezes_the_workspace(tmp_path):
@@ -103,4 +104,4 @@ def test_pipeline_hands_over_the_tested_fingerprint_and_freezes_the_workspace(tm
         assert tools.is_frozen()
     finally:
         shutil.rmtree(wsdir, ignore_errors=True)
-        shutil.rmtree(WORKSPACES / ".frozen" / run_id, ignore_errors=True)
+        (WORKSPACES / ".frozen" / run_id).unlink(missing_ok=True)  # the freeze marker is a file
