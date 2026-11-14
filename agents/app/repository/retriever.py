@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
+from .security import resolve_inside
+
 STOPWORDS = {
     "add", "the", "a", "an", "to", "for", "of", "and", "or", "in", "on", "with",
     "make", "support", "implement", "create", "new", "feature", "please", "should",
@@ -47,10 +49,12 @@ def keywords(feature_request: str) -> set[str]:
     return expanded
 
 
-def _read(path: Path) -> str:
+def _read(root: Path, rel: str) -> str:
+    """The file's text, or "" when it cannot be read or its real path (after
+    shortcuts) is a secret or outside the workspace (D2)."""
     try:
-        return path.read_text(errors="replace")[:MAX_READ]
-    except OSError:
+        return resolve_inside(root, rel).read_text(errors="replace")[:MAX_READ]
+    except (OSError, ValueError):
         return ""
 
 
@@ -82,7 +86,7 @@ def _import_edges(files: list[dict], root: Path) -> dict[str, list[str]]:
     for f in files:
         if f["language"] not in ("python", "javascript", "jsx", "typescript", "tsx"):
             continue
-        text = _read(root / f["path"])
+        text = _read(root, f["path"])
         mods: list[str] = []
         if f["language"] == "python":
             mods += [m for a, b in _PY_IMPORT.findall(text) for m in (a, b) if m]
@@ -123,7 +127,7 @@ def retrieve(feature_request: str, workspace: str, manifest: dict, max_files: in
     for f in files:
         if f["type"] not in ("source", "test", "config", "doc"):
             continue
-        text = _read(root / f["path"]).lower()
+        text = _read(root, f["path"]).lower()
         if not text:
             continue
         count = sum(text.count(k) for k in kw)

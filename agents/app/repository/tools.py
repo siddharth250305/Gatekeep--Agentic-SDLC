@@ -3,25 +3,35 @@ calls these - never raw shell. Every path is confined to the run workspace."""
 
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
 
 from . import scanner
-from .security import is_sensitive_path, redact_secrets
+from .security import is_sensitive_path, redact_secrets, resolve_inside
 
 
 class WorkspaceTools:
     def __init__(self, workspace: str):
         self.root = Path(workspace).resolve()
+        # Set while a review is pending (B6). It sits next to the workspace,
+        # not inside it, so nothing the robot writes can remove it.
+        self.freeze_marker = self.root.parent / ".frozen" / self.root.name
 
     def _safe(self, path: str) -> Path:
-        p = (self.root / path).resolve()
-        root = str(self.root)
-        if str(p) != root and not str(p).startswith(root + os.sep):
-            raise ValueError("path escapes the workspace")
-        if any(part.lower() == ".git" for part in p.relative_to(self.root).parts):
-            raise ValueError("path is inside .git")
-        return p
+        # The real file behind every shortcut is checked, not just the name (D2).
+        return resolve_inside(self.root, path)
+
+    # ── B6: no writes while a review is pending ──────────────────────────
+
+    def is_frozen(self) -> bool:
+        return self.freeze_marker.exists()
+
+    def freeze(self, fingerprint: str) -> None:
+        self.freeze_marker.parent.mkdir(parents=True, exist_ok=True)
+        self.freeze_marker.write_text(json.dumps({"fingerprint": fingerprint}))
+
+    def thaw(self) -> None:
+        self.freeze_marker.unlink(missing_ok=True)
 
     def list_files(self) -> list[str]:
         return [f["path"] for f in scanner.scan(str(self.root))]
@@ -37,16 +47,16 @@ class WorkspaceTools:
         return redacted
 
     def search_code(self, query: str, limit: int = 50) -> list[dict]:
+        """Matches are found in the redacted text, so a search can neither show
+        a secret value nor confirm that one exists (D3)."""
         q = query.lower()
         out: list[dict] = []
         for f in scanner.scan(str(self.root)):
-            if is_sensitive_path(f["path"]):
-                continue
             try:
-                lines = (self.root / f["path"]).read_text(errors="replace").splitlines()
-            except OSError:
+                text = self._safe(f["path"]).read_text(errors="replace")
+            except (OSError, ValueError):
                 continue
-            for i, line in enumerate(lines, 1):
+            for i, line in enumerate(redact_secrets(text)[0].splitlines(), 1):
                 if q in line.lower():
                     out.append({"path": f["path"], "line": i, "text": line.strip()[:200]})
                     if len(out) >= limit:
@@ -56,6 +66,8 @@ class WorkspaceTools:
     def _safe_writable(self, path: str) -> Path:
         # The MCP policy engine checks this too; checking here as well covers
         # every caller, including the built-in pipeline agent.
+        if self.is_frozen():
+            raise ValueError("refused: the workspace is frozen while the code is at Gate 3 for review")
         if is_sensitive_path(path):
             raise ValueError(f"refused: {path} is a sensitive file")
         return self._safe(path)

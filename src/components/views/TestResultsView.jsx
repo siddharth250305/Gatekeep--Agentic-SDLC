@@ -98,9 +98,12 @@ export default function TestResultsView({ run, onRerunTests }) {
               {run?.verified !== false ? 'Verified' : 'Chain Broken'}
             </span>
           </div>
-          <div className="mt-1 font-mono text-[11px] text-faint dark:text-[#8e8e93]">SHA-256 hash-chained</div>
+          <div className="mt-1 font-mono text-[11px] text-faint dark:text-[#8e8e93]">HMAC-SHA256 chained</div>
         </div>
       </div>
+
+      {/* Every test in the last run, from pytest's JUnit report (C2), marked new or existing (C3) */}
+      {tests?.cases?.length > 0 && <TestCaseList tests={tests} />}
 
       {/* Two-Column Split: Terminal Console (Left) + Container Sandbox Specs (Right) */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
@@ -198,10 +201,51 @@ export default function TestResultsView({ run, onRerunTests }) {
           </div>
 
           <div className="mt-3 rounded-xl bg-black/[0.025] border border-black/[0.05] p-3.5 text-[11.5px] leading-relaxed text-muted dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#a1a1aa]">
-            The agent code is mounted read-only (<code className="font-mono text-ink dark:text-white">:ro</code>). Execution runs inside disposable memory-backed tmpfs without access to host sockets or secrets.
+            Tests run on a read-only copy of the code (<code className="font-mono text-ink dark:text-white">:ro</code>) with secret files (.env, keys, .git) removed, inside disposable memory-backed tmpfs with no network. Results come from pytest's JUnit report, not from printed text.
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+const CASE_TONES = { passed: 'pass', failed: 'fail', error: 'fail', skipped: 'none' }
+
+function TestCaseList({ tests }) {
+  const existing = tests.cases.filter((c) => !c.new).length
+  const missing = tests.missingExisting || []
+  return (
+    <div className="card p-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-[14px] font-semibold text-ink dark:text-[#f5f5f7]">Tests in the last run</h3>
+        <span className="font-mono text-[11px] text-faint dark:text-[#8e8e93]">
+          {existing} existing · {tests.cases.length - existing} new
+        </span>
+      </div>
+      {missing.length > 0 && (
+        <p role="alert" className="mt-2 text-[12px] font-medium text-[#d70015] dark:text-[#ff453a]">
+          Existing tests that did not run: {missing.join(', ')}
+        </p>
+      )}
+      <ul aria-label="Tests in the last run" className="mt-3 divide-y divide-black/[0.05] dark:divide-white/[0.06]">
+        {tests.cases.map((c, i) => {
+          const tone = TONES[CASE_TONES[c.outcome] || 'none']
+          return (
+            <li key={`${c.file}::${c.name}::${i}`} className="flex items-center gap-2.5 py-1.5 text-[12px]">
+              <tone.Icon size={14} strokeWidth={2.5} className={`shrink-0 ${tone.icon}`} aria-label={c.outcome} />
+              <span className="min-w-0 flex-1 truncate font-mono text-ink dark:text-[#f5f5f7]" title={`${c.file}::${c.name}`}>
+                {c.name}
+                <span className="ml-2 text-faint dark:text-[#8e8e93]">{c.file}</span>
+              </span>
+              <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold ${c.new
+                ? 'bg-accent/10 text-accent dark:text-[#4da3ff]'
+                : 'bg-black/[0.05] text-muted dark:bg-white/[0.08] dark:text-[#a1a1aa]'}`}>
+                {c.new ? 'New' : 'Existing'}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }

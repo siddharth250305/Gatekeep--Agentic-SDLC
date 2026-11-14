@@ -532,15 +532,15 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [x] F9 Remove role dropdown (done early with A1; re-checked in Milestone 2)
 
 **Milestone 3: Trustworthy evidence**
-- [ ] C2 JUnit results
-- [ ] C3 Run existing tests
-- [ ] B6 Freeze workspace
-- [ ] B7 Approve exact version
-- [ ] D2 Symlinks
-- [ ] D3 Redact everywhere
-- [ ] D8 Strip secrets before tests
-- [ ] E4 Run ID and head anchor
-- [ ] E1 HMAC
+- [x] C2 JUnit results
+- [x] C3 Run existing tests
+- [x] B6 Freeze workspace
+- [x] B7 Approve exact version
+- [x] D2 Symlinks
+- [x] D3 Redact everywhere
+- [x] D8 Strip secrets before tests
+- [x] E4 Run ID and head anchor
+- [x] E1 HMAC
 
 **Milestone 4: Clear reviewer experience**
 - [ ] G2 Split big files

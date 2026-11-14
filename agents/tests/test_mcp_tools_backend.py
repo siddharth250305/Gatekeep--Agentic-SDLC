@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app.mcp.session import McpSession, SessionManager
+from app.fingerprint import tree_fingerprint
 from app.mcp.tools import GateKeepTools
 
 BASE = "http://test-backend"
@@ -228,17 +229,38 @@ SANDBOX_RESULT = {"status": "Passed", "passed": 3, "failed": 0, "total": 3, "exi
                   "duration_ms": 120, "output": "3 passed"}
 
 
-def test_run_tests_reports_results_and_audits(gk, backend):  # noqa: D103
+def test_run_tests_records_a_test_run_bound_to_the_code_fingerprint(gk, backend, tmp_path):
+    # C2 + B7: each test run is stored with the exact code fingerprint it ran on.
+    (tmp_path / "app.py").write_text("x = 1\n")
+    backend.routes[("POST", "/runs/RUN-1/test-runs")] = (201, {"id": "tr-1"})
+    result = {**SANDBOX_RESULT, "cases": [{"name": "test_a", "file": "t.py", "outcome": "passed", "new": True}],
+              "skipped": 0, "missing_existing": []}
+    with patch("app.mcp.tools.SandboxRunner") as runner:
+        runner.return_value.run_path.return_value = result
+        out = gk.run_tests("s1")
+    assert out["test_run_id"] == "tr-1"
+    [sent] = backend.sent("POST", "/runs/RUN-1/test-runs")
+    assert sent["fingerprint"] == tree_fingerprint(str(tmp_path))
+    assert (sent["status"], sent["passed"], sent["total"]) == ("Passed", 3, 3)
+    assert sent["cases"] == result["cases"]
+    assert backend.sent("PUT", "/runs/RUN-1/tests") == []
+    audit = backend.sent("POST", "/runs/RUN-1/audit")[0]
+    assert audit["event"] == "mcp.tests.run"
+    assert audit["payload"]["test_run"] == "tr-1"
+    assert audit["payload"]["fingerprint"] == sent["fingerprint"]
+
+
+def test_run_tests_always_runs_the_whole_suite(gk, backend, tmp_path):
+    # C3: a target cannot narrow the run to the robot's own test file.
     with patch("app.mcp.tools.SandboxRunner") as runner:
         runner.return_value.run_path.return_value = SANDBOX_RESULT
-        assert gk.run_tests("s1", "tests/test_x.py") == SANDBOX_RESULT
-    assert backend.sent("PUT", "/runs/RUN-1/tests")[0]["passed"] == 3
-    audit = backend.sent("POST", "/runs/RUN-1/audit")[0]
-    assert audit["event"] == "mcp.tests.run" and audit["payload"]["target"] == "tests/test_x.py"
+        out = gk.run_tests("s1", "tests/test_mine.py")
+    runner.return_value.run_path.assert_called_once_with(str(tmp_path))
+    assert "whole test suite" in out["note"]
 
 
 def test_run_tests_still_returns_results_when_reporting_fails(gk, backend, caplog):
-    backend.routes[("PUT", "/runs/RUN-1/tests")] = (500, {"error": "boom"})
+    backend.routes[("POST", "/runs/RUN-1/test-runs")] = (500, {"error": "boom"})
     with patch("app.mcp.tools.SandboxRunner") as runner, \
          caplog.at_level(logging.WARNING, logger="gatekeep.mcp"):
         runner.return_value.run_path.return_value = SANDBOX_RESULT
@@ -312,3 +334,98 @@ def test_report_model_survives_a_backend_error(gk, backend, caplog):
         assert gk.report_model("s1", "Opus 5.5") == {"updated": True, "model": "Opus 5.5"}
     assert gk.session_manager.get_session("s1").model == "Opus 5.5"
     assert "report_model warning" in caplog.text
+
+
+# ── B7: "request review" hands over the exact code fingerprint ───────────
+
+def test_request_approval_sends_the_code_fingerprint(gk, backend, tmp_path):
+    (tmp_path / "app.py").write_text("y = 2\n")
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
+    backend.routes[("POST", "/runs/RUN-1/actions/request_review")] = (200, _run(active="g3", status="awaiting_gate"))
+    with patch("app.mcp.tools.workspace_diff", return_value=""):
+        gk.request_approval("s1", "summary")
+    [action] = backend.sent("POST", "/runs/RUN-1/actions/request_review")
+    assert action["fingerprint"] == tree_fingerprint(str(tmp_path))
+
+
+def test_the_fingerprint_changes_when_any_file_changes(tmp_path):
+    (tmp_path / "a.py").write_text("1\n")
+    before = tree_fingerprint(str(tmp_path))
+    assert tree_fingerprint(str(tmp_path)) == before
+    (tmp_path / "a.py").write_text("2\n")
+    after = tree_fingerprint(str(tmp_path))
+    (tmp_path / "b.py").write_text("")
+    assert len({before, after, tree_fingerprint(str(tmp_path))}) == 3
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "a.pyc").write_bytes(b"x")  # build noise is not code
+    assert tree_fingerprint(str(tmp_path)) == tree_fingerprint(str(tmp_path))
+
+
+# ── B6: the workspace is frozen once review is requested ─────────────────
+
+def _to_gate_3(gk, backend):
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
+    backend.routes[("POST", "/runs/RUN-1/actions/request_review")] = (200, _run(active="g3", status="awaiting_gate"))
+    with patch("app.mcp.tools.workspace_diff", return_value=""):
+        assert gk.request_approval("s1", "summary")["requested"] is True
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="g3", status="awaiting_gate"))
+
+
+def test_writes_after_request_review_are_refused(gk, backend, tmp_path):
+    (tmp_path / "app.py").write_text("reviewed\n")
+    _to_gate_3(gk, backend)
+    out = gk.write_file("s1", "app.py", "changed after review\n")
+    assert out["frozen"] is True and "frozen" in out["error"]
+    out = gk.apply_patch("s1", "app.py", "reviewed", "sneaky")
+    assert out["frozen"] is True
+    assert (tmp_path / "app.py").read_text() == "reviewed\n"
+    denials = [b for b in backend.sent("POST", "/runs/RUN-1/audit") if b["event"] == "mcp.policy.denied"]
+    assert len(denials) == 2
+
+
+def test_the_freeze_holds_even_if_the_backend_answer_is_stale(gk, backend, tmp_path):
+    # A write that raced the move to Gate 3 must not get through.
+    (tmp_path / "app.py").write_text("reviewed\n")
+    _to_gate_3(gk, backend)
+    backend.routes[("GET", "/runs/RUN-1")] = (503, {"error": "down"})
+    with pytest.raises(httpx.HTTPStatusError):
+        gk.write_file("s1", "app.py", "x\n")
+    assert (tmp_path / "app.py").read_text() == "reviewed\n"
+
+
+def test_the_freeze_lifts_when_gate_3_sends_the_work_back_to_code(gk, backend, tmp_path):
+    (tmp_path / "app.py").write_text("reviewed\n")
+    _to_gate_3(gk, backend)
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))  # Gate 3 rejected to Code
+    assert gk.write_file("s1", "app.py", "rework\n")["bytes"] == 7
+    assert (tmp_path / "app.py").read_text() == "rework\n"
+
+
+def test_a_refused_review_request_does_not_freeze_the_workspace(gk, backend, tmp_path):
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
+    backend.routes[("POST", "/runs/RUN-1/actions/request_review")] = (409, {"error": "no", "reason": "not_allowed"})
+    with patch("app.mcp.tools.workspace_diff", return_value=""):
+        assert gk.request_approval("s1", "summary")["requested"] is False
+    assert gk.write_file("s1", "app.py", "still coding\n")["bytes"] == 13
+
+
+# ── D3: diffs and search results leaving through the MCP tools are redacted
+
+def test_get_diff_hides_secrets(gk, tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "settings.py").write_text('API_KEY = "sk_live_abcdef123456"\n')
+    assert "sk_live_abcdef123456" not in gk.get_diff("s1")
+
+
+def test_an_ambiguous_review_failure_keeps_the_freeze_if_the_run_reached_gate_3(gk, backend, tmp_path):
+    # Security review #11: the move may have committed even though the answer was lost.
+    backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="code"))
+    def lost_answer(*a, **kw):
+        backend.routes[("GET", "/runs/RUN-1")] = (200, _run(active="g3", status="awaiting_gate"))
+        raise httpx.ReadTimeout("no answer")
+    with patch.object(gk, "_robot_action", side_effect=lost_answer), \
+         patch("app.mcp.tools.workspace_diff", return_value=""):
+        with pytest.raises(httpx.ReadTimeout):
+            gk.request_approval("s1", "summary")
+    assert gk.write_file("s1", "app.py", "x\n")["frozen"] is True

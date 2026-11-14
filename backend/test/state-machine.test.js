@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import { ACTIONS, STEPS, planMove } from '../src/runs/machine.js'
 import { cancelRun, createRun, decideGate, getRun, robotAction } from '../src/runs/service.js'
 import { freshDb } from './helpers/db.js'
+import { FP, handOver } from './helpers/evidence.js'
 
 const ROBOT = 'Robot'
 // [from, action, to, who]
@@ -165,7 +166,7 @@ test('the happy path walks every forward row of the table', async () => {
   assert.equal(await stepOf(db, id), 'code')
 
   // B3: "request review" moves the run from Code to a real, human Gate 3.
-  assert.ok((await robotAction(db, id, 'request_review', { agent })).run)
+  assert.ok((await handOver(db, id, { agent })).run)
   run = await getRun(db, id)
   assert.equal(run.step, 'g3')
   assert.equal(run.status, 'awaiting_gate')
@@ -199,11 +200,11 @@ test('B4: each reject sends the run back to the right step', async () => {
 
   await robotAction(db, id, 'submit_design', { agent })
   await decideGate(db, id, { decision: 'approve', user: ENGINEER })
-  await robotAction(db, id, 'request_review', { agent })
+  await handOver(db, id, { agent })
   assert.ok((await decideGate(db, id, { decision: 'reject', target: 'code', user: ENGINEER })).run)
   assert.equal(await stepOf(db, id), 'code')
 
-  await robotAction(db, id, 'request_review', { agent })
+  await handOver(db, id, { agent })
   assert.ok((await decideGate(db, id, { decision: 'reject', target: 'design', user: ENGINEER })).run)
   assert.equal(await stepOf(db, id), 'design')
   const states = await phaseStates(db, id)
@@ -222,7 +223,7 @@ test('B4: rejecting at Gate 3 needs a target (code or design)', async () => {
   await decideGate(db, id, { decision: 'approve', user: PLANNER })
   await robotAction(db, id, 'submit_design', { agent: 'mcp' })
   await decideGate(db, id, { decision: 'approve', user: ENGINEER })
-  await robotAction(db, id, 'request_review', { agent: 'mcp' })
+  await handOver(db, id, { agent: 'mcp' })
   assert.equal((await decideGate(db, id, { decision: 'reject', user: ENGINEER })).error, 'target_required')
   assert.equal((await decideGate(db, id, { decision: 'reject', target: 'req', user: ENGINEER })).error, 'target_required')
   assert.equal(await stepOf(db, id), 'g3')
@@ -246,7 +247,7 @@ test('B4 regression: reject at Gate 2, resubmit requirements, can never jump to 
   assert.equal((await decideGate(db, id, { decision: 'approve', user: PLANNER })).error, 'not_allowed')
   assert.equal((await decideGate(db, id, { decision: 'approve', user: ENGINEER })).error, 'not_allowed')
   // Asking for code review from Design is refused too.
-  assert.equal((await robotAction(db, id, 'request_review', { agent: 'mcp' })).error, 'not_allowed')
+  assert.equal((await robotAction(db, id, 'request_review', { agent: 'mcp', fingerprint: FP })).error, 'not_allowed')
 
   assert.equal(await stepOf(db, id), 'design')
   const states = await phaseStates(db, id)
@@ -265,12 +266,12 @@ test('a finished (Done) run cannot be reopened by anyone', async () => {
   await decideGate(db, id, { decision: 'approve', user: PLANNER })
   await robotAction(db, id, 'submit_design', { agent: 'mcp' })
   await decideGate(db, id, { decision: 'approve', user: ENGINEER })
-  await robotAction(db, id, 'request_review', { agent: 'mcp' })
+  await handOver(db, id, { agent: 'mcp' })
   await decideGate(db, id, { decision: 'approve', user: ENGINEER })
   const chainBefore = (await getRun(db, id)).auditChain.length
 
   for (const a of ['submit_requirements', 'submit_design', 'request_review']) {
-    assert.equal((await robotAction(db, id, a, { agent: 'mcp' })).error, 'finished')
+    assert.equal((await robotAction(db, id, a, { agent: 'mcp', fingerprint: FP })).error, 'finished')
   }
   for (const d of [{ decision: 'approve' }, { decision: 'reject' }, { decision: 'reject', target: 'code' }]) {
     assert.equal((await decideGate(db, id, { ...d, user: ENGINEER })).error, 'finished')
@@ -296,7 +297,7 @@ test('cancel works from every active step and is final', async () => {
     const db = await freshDb()
     const id = await newRun(db, `RUN-C-${step}`)
     for (const [kind, x] of path) {
-      const out = kind === 'robot' ? await robotAction(db, id, x, { agent }) : await decideGate(db, id, { decision: 'approve', user: x })
+      const out = kind === 'robot' ? await robotAction(db, id, x, { agent, fingerprint: FP }) : await decideGate(db, id, { decision: 'approve', user: x })
       assert.ok(out.run, JSON.stringify(out))
     }
     assert.equal(await stepOf(db, id), step)
@@ -327,7 +328,7 @@ test('the requester cannot approve their own run at Gate 3', async () => {
   await decideGate(db, id, { decision: 'approve', user: PLANNER })
   await robotAction(db, id, 'submit_design', { agent: 'mcp' })
   await decideGate(db, id, { decision: 'approve', user: REQUESTER }) // Gate 2 is fine
-  await robotAction(db, id, 'request_review', { agent: 'mcp' })
+  await handOver(db, id, { agent: 'mcp' })
   assert.equal((await decideGate(db, id, { decision: 'approve', user: REQUESTER })).error, 'requester')
   assert.equal(await stepOf(db, id), 'g3')
   assert.ok((await decideGate(db, id, { decision: 'approve', user: ENGINEER })).run)
@@ -356,7 +357,7 @@ test('B8: an approve meant for Gate 2 cannot land on Gate 3', async () => {
   await decideGate(db, id, { decision: 'approve', user: PLANNER })
   await robotAction(db, id, 'submit_design', { agent: 'mcp' })
   await decideGate(db, id, { decision: 'approve', user: ENGINEER, expectedStep: 'g2' })
-  await robotAction(db, id, 'request_review', { agent: 'mcp' })
+  await handOver(db, id, { agent: 'mcp' })
   // A delayed second click from the Gate 2 screen arrives while the run is at Gate 3.
   const late = await decideGate(db, id, { decision: 'approve', user: ENGINEER, expectedStep: 'g2' })
   assert.equal(late.error, 'stale')
@@ -390,9 +391,9 @@ test('every step change writes exactly one audit entry with the real actor and s
     () => decideGate(db, id, { decision: 'reject', user: ENGINEER }),
     () => robotAction(db, id, 'submit_design', { agent: 'mcp-agent' }),
     () => decideGate(db, id, { decision: 'approve', user: ENGINEER }),
-    () => robotAction(db, id, 'request_review', { agent: 'mcp-agent' }),
+    () => handOver(db, id, { agent: 'mcp-agent' }),
     () => decideGate(db, id, { decision: 'reject', target: 'code', user: ENGINEER }),
-    () => robotAction(db, id, 'request_review', { agent: 'mcp-agent' }),
+    () => handOver(db, id, { agent: 'mcp-agent' }),
     () => decideGate(db, id, { decision: 'approve', user: ENGINEER }),
   ]
   const expected = [
@@ -444,7 +445,7 @@ test('a refused move writes nothing to the audit log', async () => {
   const id = await newRun(db)
   const before = (await getRun(db, id)).auditChain.length
   await decideGate(db, id, { decision: 'approve', user: PLANNER })
-  await robotAction(db, id, 'request_review', { agent: 'mcp' })
+  await robotAction(db, id, 'request_review', { agent: 'mcp', fingerprint: FP })
   await cancelRun(db, id, { user: { id: 50, username: 'x', role: 'Visitor' } })
   assert.equal((await getRun(db, id)).auditChain.length, before)
 })

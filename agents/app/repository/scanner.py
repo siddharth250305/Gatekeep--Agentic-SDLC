@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .security import is_sensitive_path
+from .security import resolve_inside
 
 # extension -> language. Extend here to support more languages.
 LANGUAGES: dict[str, str] = {
@@ -99,8 +99,10 @@ def scan(workspace: str) -> list[dict]:
                 rel = str(full.relative_to(root))
             except ValueError:
                 continue
-            if is_sensitive_path(rel):
-                continue  # secrets never enter the index
+            try:
+                resolve_inside(root, rel)
+            except ValueError:
+                continue  # secrets, and shortcuts to them or out of the workspace, never enter the index
             ext = full.suffix.lower()
             language = detect_language(ext)
             recognised = (language is not None or fn in DEPENDENCY_FILES

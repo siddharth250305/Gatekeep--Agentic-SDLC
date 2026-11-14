@@ -105,6 +105,8 @@ export default function CodeReview({
   onDeleteComment,
   onDecide,
   canAct,
+  canApprove = canAct,
+  approveBlocked,
   onTamper,
   showInspector = true,
 }) {
@@ -814,7 +816,7 @@ export default function CodeReview({
               </div>
             </div>
 
-            {/* SHA-256 Ledger Card */}
+            {/* HMAC Ledger Card */}
             <div className="rounded-2xl border border-black/[0.06] bg-white p-4 shadow-card dark:border-white/[0.08] dark:bg-[#141416]">
               <div className="flex items-center gap-3">
                 <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
@@ -824,7 +826,7 @@ export default function CodeReview({
                 </span>
                 <div className="min-w-0 flex-1 leading-tight">
                   <div className="text-[12.5px] font-semibold text-ink dark:text-[#f5f5f7]">
-                    {run?.verified !== false ? 'SHA-256 Verified' : 'Chain Broken'}
+                    {run?.verified !== false ? 'HMAC Verified' : 'Chain Broken'}
                   </div>
                   <div className="text-[11px] text-faint dark:text-[#8e8e93]">Tamper-evident ledger</div>
                 </div>
@@ -849,11 +851,18 @@ export default function CodeReview({
                 <div className="text-[11.5px] font-medium text-accent">
                   Gate ready for reviewer decision
                 </div>
+                {approveBlocked && (
+                  <div role="note" className="text-[11.5px] font-medium text-[#d70015] dark:text-[#ff453a]">
+                    {approveBlocked}. Approve is disabled.
+                  </div>
+                )}
                 <div className="flex flex-col gap-1.5">
                   <button
                     type="button"
+                    disabled={!canApprove}
+                    title={approveBlocked || undefined}
                     onClick={() => onDecide?.('approve')}
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-2 text-[12.5px] font-semibold text-white shadow-sm hover:bg-accent-hover active:scale-[0.98] transition-all"
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-accent px-4 py-2 text-[12.5px] font-semibold text-white shadow-sm hover:bg-accent-hover active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Check size={14} />
                     <span>Approve Gate</span>

@@ -21,6 +21,7 @@ from .pricing import cost_usd
 from .sandbox import verdict
 from .selfheal import self_heal
 from .diffing import diff_artifacts, workspace_diff
+from .fingerprint import files_fingerprint, tree_fingerprint
 from .workspace import fetch_repo, is_git_url, read_file
 from .repository.context import build_context
 from .repository import scanner
@@ -255,6 +256,8 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
     def coding(state):
         m, content = run_phase(state, "code", "coding", "code-agent")
         review = None  # files / diff / summary handed over with "request review"
+        fingerprint = None  # the exact code that was tested and is handed over (B7)
+        frozen_tools = None  # frozen once review is requested (B6)
 
         # Execute tests in the isolated sandbox and report the real result.
         if runner is not None:
@@ -265,6 +268,9 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 design_obj = state.get("design") or {}
                 requirements_txt = state.get("requirements") or ""
                 tools = WorkspaceTools(workspace)
+                # The graph only comes back here when the backend sent the
+                # work back to Code, so the review freeze no longer applies.
+                tools.thaw()
 
                 modified_files = set()
                 created_files = set()
@@ -386,9 +392,10 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                 except Exception:
                     pass
 
-                # Validate the agent's change with its test
-                test_target = target_test or f"test_{slug}.py"
-                res = {**runner.run_path(workspace, target=test_target), "iterations": 0}
+                # The whole suite runs, the agent's new tests and the existing ones (C3).
+                fingerprint = tree_fingerprint(workspace)
+                res = {**runner.run_path(workspace), "iterations": 0}
+                frozen_tools = tools
 
                 # Build files summary and diff (same hardened diff the MCP path uses)
                 all_changed = sorted(modified_files | created_files)
@@ -406,7 +413,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
 
                 sub = (f"Grounded in {len(design_obj.get('files_to_modify', []))} relevant file(s); "
                        f"modified {len(modified_files)} file(s), created {len(created_files)} file(s); "
-                       f"ran {test_target} in sandbox.")
+                       f"ran the whole test suite in the sandbox.")
             else:
                 # Demo mode: canned files.
                 def fix(fs, output):
@@ -417,6 +424,7 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                     )
                     return fs
                 res = self_heal(runner, dict(CODE_FILES), fix)
+                fingerprint = files_fingerprint(CODE_FILES)
                 files = [{"path": p, "add": c.count("\n"), "rem": 0} for p, c in CODE_FILES.items()]
                 main_file = next(iter(CODE_FILES))
                 diff = {"file": main_file, "add": sum(f["add"] for f in files), "rem": 0,
@@ -424,11 +432,12 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
                                   for i, ln in enumerate(CODE_FILES[main_file].splitlines())]}
                 sub = "Code generated, tested in the sandbox, and ready for approval."
 
-            reporter.tests(
-                state["run_id"], status=verdict(res), **SANDBOX_ENV,
-                passed=res["passed"], failed=res["failed"], total=res["total"],
+            test_run = reporter.test_run(
+                state["run_id"], fingerprint=fingerprint, status=verdict(res), **SANDBOX_ENV,
+                passed=res["passed"], failed=res["failed"], skipped=res.get("skipped", 0), total=res["total"],
                 iterations=res["iterations"], duration_ms=res["duration_ms"],
-                output=res.get("output", ""),
+                output=res.get("output", "")[:8000], cases=res.get("cases", [])[:2000],
+                missing_existing=res.get("missing_existing", []),
             )
             review = dict(
                 files=files, diff=diff,
@@ -444,11 +453,17 @@ def build_graph(llm, reporter, runner=None, checkpointer=None):
             )
             reporter.audit(
                 state["run_id"], "sandbox.tested",
-                {"passed": res["passed"], "failed": res["failed"], "iterations": res["iterations"]},
+                {"passed": res["passed"], "failed": res["failed"], "iterations": res["iterations"],
+                 "test_run": (test_run or {}).get("id"), "fingerprint": fingerprint},
             )
 
-        # Code -> Gate 3: a human Engineer reviews (B3).
-        reporter.action(state["run_id"], "request_review", artifacts=review)
+        # Code -> Gate 3: a human Engineer reviews (B3). The workspace is
+        # frozen first and the tested fingerprint goes with the move (B6, B7).
+        # If the hand-over fails the freeze stays (the move may have happened);
+        # the coding node lifts it when the backend sends the work back to Code.
+        if frozen_tools is not None:
+            frozen_tools.freeze(fingerprint)
+        reporter.action(state["run_id"], "request_review", artifacts=review, fingerprint=fingerprint)
         return {"code": content, "metrics": [m]}
 
     # --- gate nodes (interrupt only, then route) --------------------------

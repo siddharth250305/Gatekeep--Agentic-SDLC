@@ -196,15 +196,66 @@ test('a run with no known step (from before the state machine) cannot be approve
   expect(approve).toBeDisabled()
 })
 
-test('the dashboard says SHA-256, never HMAC, until the chain really is HMAC-signed (E1)', async () => {
+test('the dashboard says SHA-256 HMAC now that the chain is HMAC-signed (E1)', async () => {
   localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
   mockBackend()
   await renderApp()
   // Overview: the Audit Ledger Seal card.
-  expect(await screen.findByText('SHA-256 hash chain')).toBeInTheDocument()
-  expect(screen.queryByText(/HMAC/)).toBeNull()
+  expect(await screen.findByText('SHA-256 HMAC')).toBeInTheDocument()
+  expect(screen.queryByText('SHA-256 hash chain')).toBeNull()
   // Audit Chain tab: the algorithm line.
   fireEvent.click(screen.getAllByTitle('Cryptographic Audit Chain')[0])
-  expect(await screen.findByText(/Algorithm: SHA-256 hash chain/)).toBeInTheDocument()
-  expect(screen.queryByText(/HMAC/)).toBeNull()
+  expect(await screen.findByText(/Algorithm: HMAC-SHA256/)).toBeInTheDocument()
+})
+
+// B7: Gate 3 approves one exact, tested version of the code.
+const atGate3With = (review) => ({ ...run0427, review })
+
+test('at Gate 3, Approve is disabled with the reason when the code changed after the last test run (B7)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const changed = atGate3With({ fingerprint: 'b'.repeat(64), testRunId: run0427.tests.id, approvable: false, reason: 'code_changed' })
+  const fetchMock = mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, changed) })
+  await renderApp()
+  // The header button and the Overview gate card both say why.
+  const approves = await screen.findAllByTitle(/changed after the last test run/)
+  await screen.findAllByRole('button', { name: new RegExp(run0427.id) })
+  expect(approves.length).toBe(2)
+  for (const button of approves) expect(button).toBeDisabled()
+  expect(screen.getByRole('note')).toHaveTextContent('The code changed after the last test run. Approve is disabled.')
+  for (const button of approves) fireEvent.click(button)
+  expect(lastDecision(fetchMock)).toBeNull()
+})
+
+test('at Gate 3 with no review evidence at all, Approve stays disabled (fail closed)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, atGate3With(undefined)) })
+  await renderApp()
+  await screen.findAllByRole('button', { name: new RegExp(run0427.id) })
+  const approves = await screen.findAllByTitle(/no tested version/i)
+  for (const button of approves) expect(button).toBeDisabled()
+})
+
+test('the test results page lists every test, marked new or existing (C2, C3)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  mockBackend()
+  await renderApp()
+  fireEvent.click((await screen.findAllByTitle('Test Results & Sandbox'))[0])
+  const list = await screen.findByRole('list', { name: 'Tests in the last run' })
+  const rows = list.querySelectorAll('li')
+  expect(rows).toHaveLength(4)
+  expect(rows[0]).toHaveTextContent('test_webhook_accepts_valid_payload')
+  expect(rows[0]).toHaveTextContent('Existing')
+  expect(rows[1]).toHaveTextContent('New')
+  expect(screen.getByText('1 existing · 3 new')).toBeInTheDocument()
+})
+
+test('a deleted chain head is explained without inventing a block number (E4)', async () => {
+  localStorage.setItem('gatekeep_session', JSON.stringify(SESSION))
+  const wiped = { ...run0427, verified: false, verify: { runId: run0427.id, valid: false, brokenAt: null, reason: 'head_missing' } }
+  mockBackend({ [`GET /runs/${run0427.id}`]: () => json(200, wiped) })
+  await renderApp()
+  fireEvent.click((await screen.findAllByTitle('Cryptographic Audit Chain'))[0])
+  expect(await screen.findByText(/The sealed chain head for this run was deleted/)).toBeInTheDocument()
+  expect(screen.getByText('Cryptographic Integrity Failure Detected')).toBeInTheDocument()
+  expect(screen.queryByText(/Block #2|\(#2\)/)).toBeNull()
 })

@@ -1,17 +1,30 @@
-// SHA-256 per-run hash chain. Pure functions, no database.
+// HMAC-SHA256 per-run audit chain. Pure functions, no database.
 //
-// Each event's hash covers its own fields AND the previous event's hash, so any
-// later mutation of a past event is detectable: recomputing the chain from the
-// stored fields no longer matches the stored hashes.
+// Each event's stamp covers its own fields, its run id AND the previous
+// event's stamp, so any later change to a past event, or an event copied in
+// from another run, no longer matches (E4).
 //
-// Tamper-EVIDENT (plain SHA-256). To make it tamper-PROOF against an attacker
-// who can recompute the whole chain, add a keyed HMAC over the same preimage
-// using a server secret. Left as a v2 upgrade.
+// The stamp is an HMAC with a key kept outside the database, in the
+// GATEKEEP_AUDIT_KEY environment variable (E1). Someone who can edit the
+// database can recompute plain SHA-256 hashes, but not these stamps.
+// The run's latest stamp is also kept in audit_heads with its own HMAC
+// (headMac), so deleting the last entries is detected too (E4).
 
-import { createHash } from 'node:crypto'
+import { createHmac } from 'node:crypto'
 
 // Genesis prev_hash for seq 1 of every run (64 zeros).
 export const GENESIS = '0'.repeat(64)
+
+const MIN_KEY_LENGTH = 32
+
+// The stamping key. Missing or short: refuse (fail closed), never fall back
+// to unkeyed hashes.
+export function auditKey() {
+  const key = process.env.GATEKEEP_AUDIT_KEY
+  if (!key) throw new Error('GATEKEEP_AUDIT_KEY is not set: the audit diary cannot be stamped')
+  if (key.length < MIN_KEY_LENGTH) throw new Error(`GATEKEEP_AUDIT_KEY must be at least ${MIN_KEY_LENGTH} characters`)
+  return key
+}
 
 // Recursively sort object keys so serialization is deterministic regardless of
 // insertion order or storage round-trips.
@@ -29,8 +42,9 @@ function canonicalize(value) {
   return value
 }
 
-export function canonicalBytes({ seq, event, actor, payload, createdAt, prevHash }) {
+export function canonicalBytes({ runId, seq, event, actor, payload, createdAt, prevHash }) {
   const obj = canonicalize({
+    run_id: runId,
     seq,
     event,
     actor,
@@ -41,13 +55,21 @@ export function canonicalBytes({ seq, event, actor, payload, createdAt, prevHash
   return Buffer.from(JSON.stringify(obj), 'utf8')
 }
 
-export function computeHash(fields) {
-  return createHash('sha256').update(canonicalBytes(fields)).digest('hex')
+export function computeHash(fields, key = auditKey()) {
+  return createHmac('sha256', key).update(canonicalBytes(fields)).digest('hex')
 }
 
-// events: array of { seq, event, actor, payload, createdAt, prevHash, hash }
-// ordered by seq ascending.
-export function verifyChain(events) {
+// The HMAC that seals a run's head (its latest seq and stamp).
+export function headMac({ runId, seq, hash }, key = auditKey()) {
+  const bytes = Buffer.from(JSON.stringify({ head: true, run_id: runId, seq: Number(seq), hash }), 'utf8')
+  return createHmac('sha256', key).update(bytes).digest('hex')
+}
+
+// events: array of { runId, seq, event, actor, payload, createdAt, prevHash, hash }
+// ordered by seq ascending. head: { runId, seq, hash, mac } from audit_heads,
+// or null when the run has no head row. Every entry must link and match its
+// HMAC, and the last one must be the sealed head.
+export function verifyChain(events, head, key = auditKey()) {
   let expectedPrev = GENESIS
   for (const e of events) {
     // 1. Linkage: this event must point at the previous event's hash.
@@ -60,8 +82,8 @@ export function verifyChain(events) {
         storedPrevHash: e.prevHash,
       }
     }
-    // 2. Integrity: recomputing the hash from stored fields must match.
-    const recomputed = computeHash(e)
+    // 2. Integrity: recomputing the stamp from stored fields must match.
+    const recomputed = computeHash(e, key)
     if (recomputed !== e.hash) {
       return {
         valid: false,
@@ -72,6 +94,24 @@ export function verifyChain(events) {
       }
     }
     expectedPrev = e.hash
+  }
+  // 3. Completeness: the chain must end exactly at the sealed head.
+  if (!head) {
+    return events.length ? { valid: false, brokenAt: null, reason: 'head_missing' } : { valid: true, length: 0 }
+  }
+  if (head.mac !== headMac(head, key)) {
+    return { valid: false, brokenAt: Number(head.seq), reason: 'head_mismatch' }
+  }
+  const last = events.at(-1)
+  const tailSeq = last ? last.seq : 0
+  if (Number(head.seq) !== tailSeq || head.hash !== (last ? last.hash : GENESIS)) {
+    return {
+      valid: false,
+      brokenAt: tailSeq + 1,
+      reason: Number(head.seq) > tailSeq ? 'truncated' : 'head_mismatch',
+      expectedLength: Number(head.seq),
+      storedLength: events.length,
+    }
   }
   return { valid: true, length: events.length }
 }

@@ -1,11 +1,12 @@
 // Audit-chain persistence. Storage on top of the pure chain in chain.js.
 
 import { withTransaction } from '../db.js'
-import { GENESIS, computeHash, verifyChain } from './chain.js'
+import { GENESIS, computeHash, headMac, verifyChain } from './chain.js'
 
 // Map a DB row (snake_case) to the shape chain.js expects (camelCase).
 function toEvent(row) {
   return {
+    runId: row.run_id,
     seq: Number(row.seq),
     event: row.event,
     actor: row.actor,
@@ -17,20 +18,48 @@ function toEvent(row) {
 }
 
 // Lock the run's chain head for the rest of the transaction and return it.
-// Runs that predate audit_heads get their head created from the current tail.
-async function lockHead(tx, runId) {
-  const sel = 'SELECT seq, hash FROM audit_heads WHERE run_id = $1 FOR UPDATE'
+// The head is checked before it is extended: its seal must be valid and it
+// must point at the last entry. Otherwise someone moved it (for example back
+// to an earlier entry after deleting the newest ones), and re-sealing it
+// would hide that, so the append is refused (E4).
+// A head is created with a run's first entry. A run that already has entries
+// but no head was tampered with; and a run that exists (has a runs row) can
+// only start its diary with "run.created", so a wiped diary cannot restart.
+async function lockHead(tx, runId, event) {
+  const sel = 'SELECT seq, hash, mac FROM audit_heads WHERE run_id = $1 FOR UPDATE'
   let head = (await tx.query(sel, [runId])).rows[0]
-  if (head) return head
-  const tail = (await tx.query(
-    'SELECT seq, hash FROM audit_events WHERE run_id = $1 ORDER BY seq DESC LIMIT 1',
-    [runId],
-  )).rows[0]
-  await tx.query(
-    'INSERT INTO audit_heads (run_id, seq, hash) VALUES ($1, $2, $3) ON CONFLICT (run_id) DO NOTHING',
-    [runId, tail ? Number(tail.seq) : 0, tail ? tail.hash : GENESIS],
+  if (head) return checkedHead(tx, runId, head)
+  // Two first appends at once: the INSERT of the loser waits for the winner
+  // and then does nothing. Only the transaction that really created the head
+  // checks the run's history, so a concurrent first event is never mistaken
+  // for a deleted head.
+  const created = await tx.query(
+    'INSERT INTO audit_heads (run_id, seq, hash, mac) VALUES ($1, 0, $2, $3) ON CONFLICT (run_id) DO NOTHING',
+    [runId, GENESIS, headMac({ runId, seq: 0, hash: GENESIS })],
   )
+  if (created.rowCount === 1) {
+    const any = (await tx.query('SELECT 1 FROM audit_events WHERE run_id = $1 LIMIT 1', [runId])).rows[0]
+    if (any) throw new Error(`audit head missing for ${runId}: the diary was altered, so it cannot be extended`)
+    const run = (await tx.query('SELECT 1 FROM runs WHERE run_id = $1', [runId])).rows[0]
+    if (run && event !== 'run.created') {
+      throw new Error(`audit head missing for ${runId}: the run's diary was wiped, so it cannot be restarted`)
+    }
+  }
   head = (await tx.query(sel, [runId])).rows[0]
+  return checkedHead(tx, runId, head)
+}
+
+async function checkedHead(tx, runId, head) {
+  const seq = Number(head.seq)
+  if (head.mac !== headMac({ runId, seq, hash: head.hash })) {
+    throw new Error(`audit head for ${runId} has no valid seal: the diary was altered, so it cannot be extended`)
+  }
+  const tail = (await tx.query(
+    'SELECT seq, hash FROM audit_events WHERE run_id = $1 ORDER BY seq DESC LIMIT 1', [runId],
+  )).rows[0]
+  if ((tail ? Number(tail.seq) : 0) !== seq || (tail ? tail.hash : GENESIS) !== head.hash) {
+    throw new Error(`audit head for ${runId} does not match the last entry: the diary was altered, so it cannot be extended`)
+  }
   return head
 }
 
@@ -76,11 +105,11 @@ export async function appendEvent(db, { runId, event, actor, payload = {}, creat
   validateEvent({ runId, event, actor, payload, createdAt })
 
   return withTransaction(db, async (tx) => {
-    const head = await lockHead(tx, runId)
+    const head = await lockHead(tx, runId, event)
     const seq = Number(head.seq) + 1
     const prevHash = head.hash
     const createdAtIso = createdAt || new Date().toISOString()
-    const hash = computeHash({ seq, event, actor, payload, createdAt: createdAtIso, prevHash })
+    const hash = computeHash({ runId, seq, event, actor, payload, createdAt: createdAtIso, prevHash })
 
     const res = await tx.query(
       `INSERT INTO audit_events (run_id, seq, event, actor, payload, created_at, prev_hash, hash)
@@ -88,7 +117,10 @@ export async function appendEvent(db, { runId, event, actor, payload = {}, creat
        RETURNING *`,
       [runId, seq, event, actor, JSON.stringify(payload), createdAtIso, prevHash, hash],
     )
-    await tx.query('UPDATE audit_heads SET seq = $1, hash = $2 WHERE run_id = $3', [seq, hash, runId])
+    await tx.query(
+      'UPDATE audit_heads SET seq = $1, hash = $2, mac = $3 WHERE run_id = $4',
+      [seq, hash, headMac({ runId, seq, hash }), runId],
+    )
     return toEvent(res.rows[0])
   })
 }
@@ -103,7 +135,9 @@ export async function getChain(db, runId) {
 
 export async function verifyRun(db, runId) {
   const events = await getChain(db, runId)
-  return { runId, ...verifyChain(events) }
+  const row = (await db.query('SELECT seq, hash, mac FROM audit_heads WHERE run_id = $1', [runId])).rows[0]
+  const head = row ? { runId, seq: Number(row.seq), hash: row.hash, mac: row.mac } : null
+  return { runId, ...verifyChain(events, head) }
 }
 
 // DEMO / dev only. A REAL database mutation: rewrites a past event's payload and

@@ -172,3 +172,160 @@ def test_policy_engine_uses_the_same_list():
     for path in [".aws/credentials", "id_ed25519", "prod.env", ".ssh/known_hosts"]:
         assert engine.check_file_access(path).allowed is False, path
     assert engine.check_file_access("src/app.py").allowed is True
+
+
+# --- D2: shortcuts (symlinks) are checked by the real file behind them ----
+import os
+
+from app.diffing import workspace_diff
+from app.repository.context import build_context
+
+
+@pytest.fixture
+def linked(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "id_rsa_copy.txt").write_text("OUTSIDE-SECRET-login\n")
+    (ws / ".env").write_text("API_KEY=envsecret123456\n")
+    (ws / "app.py").write_text("def login():\n    return 1\n")
+    os.symlink(".env", ws / "config.py")                         # shortcut to a secret file
+    os.symlink(str(outside / "id_rsa_copy.txt"), ws / "notes.py")  # shortcut out of the workspace
+    os.symlink(str(outside), ws / "vendor_dir")                  # directory shortcut out of the workspace
+    os.symlink("app.py", ws / "alias.py")                        # harmless shortcut inside
+    return ws
+
+
+@pytest.mark.parametrize("path", ["config.py", "notes.py", "vendor_dir/id_rsa_copy.txt"])
+def test_reading_through_a_bad_shortcut_is_refused(linked, path):
+    with pytest.raises(ValueError):
+        WorkspaceTools(str(linked)).read_file(path)
+
+
+@pytest.mark.parametrize("path", ["config.py", "notes.py", "vendor_dir/new.py"])
+def test_writing_through_a_bad_shortcut_is_refused(linked, path):
+    tools = WorkspaceTools(str(linked))
+    with pytest.raises(ValueError):
+        tools.write_file(path, "pwned\n")
+    with pytest.raises(ValueError):
+        tools.apply_patch(path, "API_KEY", "X")
+    assert (linked / ".env").read_text() == "API_KEY=envsecret123456\n"
+    assert not (linked.parent / "outside" / "new.py").exists()
+
+
+def test_a_harmless_shortcut_inside_the_workspace_still_works(linked):
+    assert "def login" in WorkspaceTools(str(linked)).read_file("alias.py")
+
+
+def test_search_list_and_context_never_follow_bad_shortcuts(linked):
+    tools = WorkspaceTools(str(linked))
+    listed = set(tools.list_files())
+    assert {"config.py", "notes.py"}.isdisjoint(listed)
+    assert not any(p.startswith("vendor_dir") for p in listed)
+    for query in ("envsecret", "OUTSIDE-SECRET"):
+        assert tools.search_code(query) == []
+    ctx = build_context(str(linked), "login notes config", "u", "c")
+    text = repr(ctx)
+    assert "OUTSIDE-SECRET" not in text and "envsecret" not in text
+
+
+def test_the_retriever_does_not_read_through_bad_shortcuts(linked):
+    manifest = {"files": [{"path": p, "type": "source", "language": "python"}
+                          for p in ("config.py", "notes.py", "app.py")]}
+    ranked = {r["path"]: r for r in retrieve("outside secret envsecret", str(linked), manifest)}
+    for path in ("config.py", "notes.py"):
+        assert not any("references" in reason for reason in ranked.get(path, {}).get("reasons", []))
+
+
+# --- D3: secrets are hidden in every text that leaves GateKeep ------------
+
+def test_a_whole_private_key_block_is_hidden():
+    key = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\nAAAABG5vbmUAAAAEbm9uZQ\n-----END OPENSSH PRIVATE KEY-----"
+    out, cats = redact_secrets(f"before\n{key}\nafter\n")
+    assert "b3BlbnNzaC1rZXktdjEAAAA" not in out and "AAAABG5vbmUAAAAEbm9uZQ" not in out
+    assert out.startswith("before\n") and out.endswith("after\n")
+    assert "private_key_block" in cats
+
+
+def test_a_private_key_with_no_end_line_is_hidden_to_the_end():
+    out, _ = redact_secrets("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nmore\n")
+    assert "MIIEowIBAAKCAQEA" not in out and "more" not in out
+
+
+@pytest.mark.parametrize("text, secret", [
+    ("password: hello1234\n", "hello1234"),                 # unquoted YAML
+    ("  db_password: s3cr3tvalue\n", "s3cr3tvalue"),
+    ("DB_PASSWORD=hunter2hunter2\n", "hunter2hunter2"),     # .env
+    ("export AWS_SECRET_ACCESS_KEY=abcdEFGH1234\n", "abcdEFGH1234"),
+    ('{"api_key": "abcd1234efgh"}', "abcd1234efgh"),        # JSON
+    ("+SECRET_KEY=diffsecret999\n", "diffsecret999"),       # a line in a diff
+])
+def test_unquoted_and_json_secrets_are_hidden(text, secret):
+    out, _ = redact_secrets(text)
+    assert secret not in out
+    assert "***" in out
+
+
+@pytest.mark.parametrize("code", [
+    "password = get_password()\n",
+    "def check(password: str) -> bool:\n",
+    "    password=password,\n",
+    "if password == expected:\n",
+])
+def test_ordinary_code_about_passwords_is_left_alone(code):
+    assert redact_secrets(code)[0] == code
+
+
+def test_search_results_are_redacted_and_cannot_find_secret_values(tmp_path):
+    (tmp_path / "settings.py").write_text('API_KEY = "sk_live_abcdef123456"\n')
+    tools = WorkspaceTools(str(tmp_path))
+    [hit] = tools.search_code("API_KEY")
+    assert "sk_live_abcdef123456" not in hit["text"]
+    # Searching for the value itself must not reveal that it exists.
+    assert tools.search_code("sk_live_abc") == []
+
+
+def test_workspace_diff_is_redacted(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "config.yml").write_text("password: plain-old-value\n")
+    diff = workspace_diff(str(tmp_path))
+    assert "config.yml" in diff
+    assert "plain-old-value" not in diff
+
+
+def test_redaction_stays_fast_on_huge_lines():
+    # Review finding #1: a 100k-character line (minified code, a blob) must not hang redaction.
+    import time
+    started = time.perf_counter()
+    redact_secrets("a" * 100_000)
+    redact_secrets("x_" * 50_000 + "password: hunter2hunter2\n")
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("text, secret", [
+    ("STRIPE = 'sk_live_51HabcdefGHIJKL0123'", "sk_live_51HabcdefGHIJKL0123"),
+    ("key = sk-ant-api03-abcdefghijklmnop", "sk-ant-api03-abcdefghijklmnop"),
+    ("DATABASE_URL=postgres://app:s3cretpw@db:5432/x", "s3cretpw"),
+    ("url = 'https://bob:hunter22@example.com/repo.git'", "hunter22"),
+    ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+])
+def test_vendor_keys_and_url_credentials_are_hidden(text, secret):
+    assert secret not in redact_secrets(text)[0]
+
+
+def test_the_review_diff_shows_files_hidden_by_gitignore(tmp_path):
+    # Security review #3: what runs in the sandbox must be visible to the reviewer.
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("conftest.py\n")
+    (tmp_path / "conftest.py").write_text("print('rewrites the report')\n")
+    (tmp_path / "evil__pycache__").mkdir()
+    (tmp_path / "evil__pycache__" / "x.py").write_text("y = 1\n")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "a.pyc").write_bytes(b"\x00")
+    diff = workspace_diff(str(tmp_path))
+    assert "b/conftest.py" in diff
+    assert "b/evil__pycache__/x.py" in diff
+    assert "__pycache__/a.pyc" not in diff

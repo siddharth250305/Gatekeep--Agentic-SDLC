@@ -90,6 +90,21 @@ function AppFooter({ apiOnline, runs, run, activeAgents, isDarkMode, onToggleThe
   )
 }
 
+// Why Gate 3 cannot be approved right now, or null when it can (B7). The
+// server sends the evidence as run.review; missing evidence never approves.
+const REVIEW_BLOCKS = {
+  no_fingerprint: 'No code fingerprint was handed over with the review request',
+  untested: 'No test run was recorded for this code',
+  code_changed: 'The code changed after the last test run',
+  tests_not_passed: 'The last test run on this code did not pass',
+}
+
+export function approvalBlockReason(run) {
+  if (run?.step !== 'g3') return null
+  if (run.review?.approvable === true) return null
+  return REVIEW_BLOCKS[run.review?.reason] || 'There is no tested version of this code to approve'
+}
+
 export default function App() {
   const [runs, setRuns] = useState([])
   const [selectedId, setSelectedId] = useState(null)
@@ -258,7 +273,11 @@ export default function App() {
   const run = useMemo(() => runs.find((r) => r.id === selectedId) ?? runs[0], [runs, selectedId])
   // A run from before the state machine has no step; the server refuses every
   // decision on it, so the dashboard does not offer one.
-  const canAct = Boolean(run?.awaiting && run?.step)
+  const canDecide = Boolean(run?.awaiting && run?.step)
+  // B7: at Gate 3 only the exact, tested version can be approved. The server
+  // applies the same rule; this only explains it before the click.
+  const approveBlocked = canDecide ? approvalBlockReason(run) : null
+  const canApprove = canDecide && !approveBlocked
 
   const flash = (msg, ms = 3500) => { setToast(msg); setTimeout(() => setToast(null), ms) }
 
@@ -567,14 +586,14 @@ export default function App() {
           {/* Primary Action Button (Approve Gate ↗) */}
           <button
             type="button"
-            disabled={!canAct}
+            disabled={!canApprove}
             onClick={() => decide('approve')}
             className="inline-flex h-8 items-center justify-center gap-1.5 rounded-xl bg-[#0071e3] hover:bg-[#0077ed] px-2.5 sm:px-3.5 text-[12.5px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed shrink-0 whitespace-nowrap cursor-pointer"
-            title={canAct ? 'Approve the current gate' : run?.status === 'approved' ? 'This run is approved' : 'Nothing to approve right now'}
+            title={canApprove ? 'Approve the current gate' : approveBlocked || (run?.status === 'approved' ? 'This run is approved' : 'Nothing to approve right now')}
           >
             <Check size={14} strokeWidth={2.5} className="min-[360px]:hidden" aria-hidden="true" />
-            <span className="sr-only min-[360px]:not-sr-only lg:hidden">{run?.status === 'approved' && !canAct ? 'Approved' : 'Approve'}</span>
-            <span className="hidden lg:inline">{canAct ? 'Approve Gate ↗' : run?.status === 'approved' ? 'Approved ✓' : 'Approve Gate'}</span>
+            <span className="sr-only min-[360px]:not-sr-only lg:hidden">{run?.status === 'approved' && !canApprove ? 'Approved' : 'Approve'}</span>
+            <span className="hidden lg:inline">{canApprove ? 'Approve Gate ↗' : run?.status === 'approved' ? 'Approved ✓' : 'Approve Gate'}</span>
           </button>
 
           {/* Dark / Light Theme Toggle */}
@@ -673,7 +692,9 @@ export default function App() {
             onAddComment={handleAddComment}
             onDeleteComment={handleDeleteComment}
             onDecide={decide}
-            canAct={canAct}
+            canAct={canDecide}
+            canApprove={canApprove}
+            approveBlocked={approveBlocked}
             onTamper={demoMode ? doTamper : undefined}
             showInspector={true}
           />
@@ -685,7 +706,8 @@ export default function App() {
             <div className="mx-auto max-w-6xl">
               <OverviewDashboardView
                 run={run}
-                canAct={canAct}
+                canAct={canApprove}
+                approveBlocked={approveBlocked}
                 onApprove={() => decide('approve')}
                 onRequestRework={() => setReworkModalOpen(true)}
                 onStartPipeline={startPipeline}

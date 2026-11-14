@@ -75,6 +75,33 @@ CREATE TABLE IF NOT EXISTS test_results (
 
 ALTER TABLE test_results ADD COLUMN IF NOT EXISTS output TEXT;
 
+-- Every test run, kept (C2, B7). fingerprint is the SHA-256 of the exact code
+-- the tests ran on; cases holds each test's name, file, outcome and whether it
+-- is new. The latest row is what the dashboard shows and what Gate 3 checks.
+-- test_results above keeps only the sandbox profile (image, limits).
+CREATE TABLE IF NOT EXISTS test_runs (
+  id               TEXT PRIMARY KEY,
+  run_id           TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  seq              INTEGER NOT NULL,
+  fingerprint      TEXT NOT NULL,
+  status           TEXT NOT NULL,
+  passed           INTEGER NOT NULL,
+  failed           INTEGER NOT NULL,
+  skipped          INTEGER NOT NULL DEFAULT 0,
+  total            INTEGER NOT NULL,
+  iterations       INTEGER,
+  duration_ms      INTEGER,
+  output           TEXT,
+  cases            JSONB NOT NULL DEFAULT '[]'::jsonb,
+  missing_existing JSONB NOT NULL DEFAULT '[]'::jsonb,
+  recorded_by      TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (run_id, seq)
+);
+
+-- The fingerprint of the code handed over at "request review" (B7).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS review_fingerprint TEXT;
+
 -- What the coding agent actually produced (real files/diff/summary/requirements/design/comments).
 CREATE TABLE IF NOT EXISTS run_artifacts (
   run_id       TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -122,6 +149,9 @@ CREATE TABLE IF NOT EXISTS audit_heads (
   seq    INTEGER NOT NULL,
   hash   TEXT    NOT NULL
 );
+-- HMAC over (run_id, seq, hash) with the audit key, so the head cannot be
+-- moved back to hide deleted entries (E4).
+ALTER TABLE audit_heads ADD COLUMN IF NOT EXISTS mac TEXT;
 
 -- Human reviewers. role: Planner | Engineer | Admin (Admin may act for any gate).
 CREATE TABLE IF NOT EXISTS users (

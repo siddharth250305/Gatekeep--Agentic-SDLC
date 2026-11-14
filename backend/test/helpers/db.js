@@ -15,6 +15,8 @@ import { newDb } from 'pg-mem'
 import { runSchema } from '../../src/db.js'
 
 const url = process.env.TEST_DATABASE_URL
+// The audit stamp key (E1). Real deployments set their own, outside the database.
+process.env.GATEKEEP_AUDIT_KEY ??= 'test-audit-key-0123456789abcdef0123456789'
 // Never reach a real agent pipeline from tests (one may be running on :8077).
 // A port that was just freed (nothing listens there) makes /decide take its
 // local path; tests that need a pipeline start a mock and set PIPELINE_URL.
