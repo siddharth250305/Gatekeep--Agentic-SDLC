@@ -139,8 +139,9 @@ def gatekeep_list_files(run_id: str) -> list[str] | dict[str, str]:
 
 @mcp.tool()
 def gatekeep_read_file(run_id: str, path: str) -> str | dict[str, str]:
-    """Read the contents of a file from the workspace. Sensitive files (.env, keys)
-    are blocked. Secrets in content are automatically redacted. Max 40KB."""
+    """Read the contents of a file from the workspace. Sensitive files (.env, keys),
+    and shortcuts (symlinks) to them or outside the workspace, are blocked.
+    Secrets in content are replaced with ***. Max 40KB."""
     session = _ensure_session(run_id)
     run = tools.get_run(session.session_id)
     deny = _policy_gate(run, "read_file", path=path, write=False)
@@ -251,9 +252,11 @@ def gatekeep_get_diff(run_id: str) -> str | dict[str, str]:
 
 @mcp.tool()
 def gatekeep_run_tests(run_id: str, target: str | None = None) -> dict[str, Any]:
-    """Run pytest in an isolated Docker sandbox (no network, capped memory/CPU).
-    Optionally scope to a specific test file with the target parameter.
-    Only allowed during the coding phase. Results are reported to the dashboard."""
+    """Run the project's whole pytest suite in an isolated Docker sandbox (no
+    network, capped memory/CPU, secret files removed). Existing tests always run
+    alongside new ones; `target` does not narrow the run. Results come from
+    pytest's JUnit report and are recorded against the exact code fingerprint.
+    Only allowed during the coding phase."""
     session = _ensure_session(run_id)
     run = tools.get_run(session.session_id)
     deny = _policy_gate(run, "run_tests")
@@ -298,8 +301,8 @@ def gatekeep_get_approval_status(run_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 def gatekeep_get_audit_log(run_id: str) -> list[dict[str, Any]] | dict[str, str]:
-    """Get the full SHA-256 cryptographic audit chain for the run.
-    Each event is hash-linked to the previous one for tamper detection."""
+    """Get the full audit chain for the run. Each event carries an HMAC-SHA256
+    stamp (server key) linked to the previous one, so edits are detected."""
     session = _ensure_session(run_id)
     return tools.get_audit_log(session.session_id)
 

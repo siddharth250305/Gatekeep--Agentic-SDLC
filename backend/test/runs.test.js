@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createRun, getRun, listRuns, recordPhaseMetrics, upsertTests, upsertArtifacts } from '../src/runs/service.js'
+import { createRun, getRun, listRuns, recordPhaseMetrics, recordTestRun, upsertTests, upsertArtifacts } from '../src/runs/service.js'
+import { PASSING } from './helpers/evidence.js'
 import { appendEvent, tamperEvent } from '../src/audit/service.js'
 import { seed } from '../src/runs/seed.js'
 import { createApp } from '../src/app.js'
@@ -36,13 +37,18 @@ test('phase metrics roll up into totals', async () => {
   assert.equal(req.tokens, '4,180')
 })
 
-test('tests + sandbox surface on the run', async () => {
+test('tests + sandbox surface on the run; results come only from a recorded test run (C2)', async () => {
   const db = await freshDb()
   await createRun(db, { runId: 'RUN-3', brief: 'x' })
   await upsertTests(db, 'RUN-3', { status: 'Completed', image: 'python:3.12-slim', network: 'Disabled', memory: '512 MB', cpu: '1 core', timeout: '30 seconds', passed: 14, failed: 0, total: 14, iterations: 2, duration_ms: 267000 })
-  const run = await getRun(db, 'RUN-3')
+  let run = await getRun(db, 'RUN-3')
   assert.equal(run.sandbox.image, 'python:3.12-slim')
   assert.equal(run.sandbox.network, 'Disabled')
+  assert.equal(run.tests, null) // numbers written outside a test run are never shown
+
+  await db.query("UPDATE runs SET step = 'code' WHERE run_id = 'RUN-3'")
+  await recordTestRun(db, 'RUN-3', { ...PASSING, passed: 14, total: 14, iterations: 2, duration_ms: 267000 }, { agent: 'mcp' })
+  run = await getRun(db, 'RUN-3')
   assert.equal(run.tests.passed, 14)
   assert.equal(run.tests.duration, '4m 27s')
 })

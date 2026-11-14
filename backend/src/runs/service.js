@@ -3,6 +3,7 @@
 // and its verification result from the audit layer. Step changes go only
 // through transition(), which applies the allowed-moves table in machine.js.
 
+import { randomUUID } from 'node:crypto'
 import { appendEvent, getChain, verifyRun } from '../audit/service.js'
 import { withTransaction } from '../db.js'
 import { GATES, MOVES, ROBOT_ACTIONS, STEPS, planMove, robotTarget, statusFor } from './machine.js'
@@ -120,13 +121,19 @@ export async function getRun(db, runId) {
 
   const trRes = await db.query('SELECT * FROM test_results WHERE run_id = $1', [runId])
   const tr = trRes.rows[0]
-  const sandbox = tr
-    ? { status: tr.status, image: tr.image, network: tr.network, memory: tr.memory, cpu: tr.cpu, timeout: tr.timeout }
+  const latest = await latestTestRun(db, runId)
+  const sandbox = tr || latest
+    ? { status: latest?.status ?? null, image: tr?.image ?? null, network: tr?.network ?? null, memory: tr?.memory ?? null, cpu: tr?.cpu ?? null, timeout: tr?.timeout ?? null }
     : null
-  const tests =
-    tr && tr.total != null
-      ? { status: tr.status ?? null, passed: tr.passed, failed: tr.failed, total: tr.total, iterations: tr.iterations, duration: fmtDuration(tr.duration_ms), output: tr.output ?? null }
-      : null
+  // The latest recorded test run is the only source of test results (C2).
+  const tests = latest
+    ? {
+        id: latest.id, status: latest.status, passed: latest.passed, failed: latest.failed, skipped: latest.skipped,
+        total: latest.total, iterations: latest.iterations, duration: fmtDuration(latest.duration_ms),
+        output: latest.output ?? null, fingerprint: latest.fingerprint, cases: latest.cases ?? [],
+        missingExisting: latest.missing_existing ?? [], at: latest.created_at,
+      }
+    : null
 
   const artRes = await db.query('SELECT files, diff, summary, requirements, design, comments FROM run_artifacts WHERE run_id = $1', [runId])
   const art = artRes.rows[0]
@@ -135,7 +142,9 @@ export async function getRun(db, runId) {
   const repoContext = ctxRes.rows[0]?.context ?? null
 
   const chain = await getChain(db, runId)
-  const verify = await verifyRun(db, runId)
+  let verify = await verifyRun(db, runId)
+  // Every run starts with a "run.created" entry, so an empty diary means it was wiped.
+  if (verify.valid && chain.length === 0) verify = { runId, valid: false, brokenAt: 1, reason: 'truncated' }
 
   return {
     id: run.run_id,
@@ -158,6 +167,9 @@ export async function getRun(db, runId) {
     gate: run.gate,
     awaiting: run.status === 'awaiting_gate',
     createdBy: run.created_by_name ?? null,
+    // At Gate 3: which code was handed over, the test run it is judged on,
+    // and whether approval is possible (B7). Same rule the approve uses.
+    review: run.step === 'g3' ? reviewEvidence(run.review_fingerprint, latest) : null,
     started: run.started_at != null,
     updatedAt: run.updated_at,
     steps,
@@ -262,7 +274,10 @@ async function showStep(db, runId, from, to) {
 // expectedStep: refuse with 'stale' if the run is no longer at this step.
 // sameAs: for robot actions, a step at which the action already happened, so a
 // repeat returns { unchanged: true } instead of an error.
-async function transition(db, runId, { pick, actor, name, feedback, details, artifacts, expectedStep, sameAs }) {
+// guard(tx, run, plan): after the move is allowed by the table, a last check
+// (Gate 3 evidence, B7). Returns { error } to refuse, or { payload } with
+// fields to add to the move's audit entry.
+async function transition(db, runId, { pick, actor, name, feedback, details, artifacts, expectedStep, sameAs, guard }) {
   const out = await withTransaction(db, async (tx) => {
     const run = (await tx.query('SELECT * FROM runs WHERE run_id = $1 FOR UPDATE', [runId])).rows[0]
     if (!run) return { error: 'not_found' }
@@ -273,6 +288,8 @@ async function transition(db, runId, { pick, actor, name, feedback, details, art
     if (action.error) return action
     const plan = planMove({ step: run.step, createdBy: run.created_by }, action, actor)
     if (plan.error) return { ...plan, step: run.step }
+    const guarded = guard ? await guard(tx, run, plan) : {}
+    if (guarded.error) return { ...guarded, step: run.step }
 
     const { status, gate } = statusFor(plan.to)
     await tx.query(
@@ -281,7 +298,7 @@ async function transition(db, runId, { pick, actor, name, feedback, details, art
     )
     await showStep(tx, runId, run.step, plan.to)
     if (artifacts) await upsertArtifacts(tx, runId, artifacts)
-    const payload = { from: run.step, to: plan.to }
+    const payload = { from: run.step, to: plan.to, ...guarded.payload }
     if (typeof feedback === 'string' && feedback.trim()) payload.feedback = feedback
     if (details) payload.details = details
     await appendEvent(tx, { runId, event: plan.move.event, actor: name, payload })
@@ -306,8 +323,16 @@ export async function decideGate(db, runId, { decision, target, feedback, expect
     if (target === 'design') return 'reject_to_design'
     return { error: 'target_required' }
   }
+  // B7: Gate 3 approves only the exact code that was handed over, and only
+  // when the latest test run passed on that same code.
+  const guard = async (tx, run, plan) => {
+    if (plan.to !== 'done') return {}
+    const evidence = reviewEvidence(run.review_fingerprint, await latestTestRun(tx, runId))
+    if (!evidence.approvable) return { error: evidence.reason }
+    return { payload: { evidence: { fingerprint: evidence.fingerprint, testRun: evidence.testRunId } } }
+  }
   return transition(db, runId, {
-    pick, actor: humanActor(user), name: user?.username, feedback, expectedStep,
+    pick, actor: humanActor(user), name: user?.username, feedback, expectedStep, guard,
   })
 }
 
@@ -337,15 +362,24 @@ const ACTION_ARTIFACTS = Object.fromEntries(
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
-export async function robotAction(db, runId, action, { agent, details, artifacts } = {}) {
+export async function robotAction(db, runId, action, { agent, details, artifacts, fingerprint } = {}) {
   if (!ROBOT_ACTIONS.has(action)) return { error: 'bad_action' }
+  // B7: review is always of one exact version of the code.
+  const review = action === 'request_review'
+  if (review && !(typeof fingerprint === 'string' && FINGERPRINT.test(fingerprint))) return { error: 'fingerprint_required' }
   if (details !== undefined && !isPlainObject(details)) return { error: 'bad_details' }
   if (artifacts !== undefined) {
     if (!isPlainObject(artifacts)) return { error: 'bad_artifacts' }
     if (Object.keys(artifacts).some((k) => !ACTION_ARTIFACTS[action].includes(k))) return { error: 'bad_artifacts' }
   }
+  const guard = review
+    ? async (tx) => {
+        await tx.query('UPDATE runs SET review_fingerprint = $1 WHERE run_id = $2', [fingerprint, runId])
+        return { payload: { fingerprint, testRun: (await latestTestRun(tx, runId))?.id ?? null } }
+      }
+    : undefined
   const out = await transition(db, runId, {
-    pick: () => action, actor: { kind: 'agent' }, name: `agent:${agent}`, details, artifacts, sameAs: robotTarget(action),
+    pick: () => action, actor: { kind: 'agent' }, name: `agent:${agent}`, details, artifacts, sameAs: robotTarget(action), guard,
   })
   if (out.unchanged) return { unchanged: true, run: await getRun(db, runId) }
   return out
@@ -484,7 +518,90 @@ export async function upsertRepoContext(db, runId, context) {
   await touchRun(db, runId)
 }
 
-// Upsert the run's latest sandbox + test result (manual upsert for pg-mem).
+// ── Test runs and Gate 3 evidence (C2, C3, B6, B7) ───────────────────────
+
+const FINGERPRINT = /^[0-9a-f]{64}$/
+// The verdicts the sandbox can give (agents/app/sandbox.py verdict()).
+const VERDICTS = new Set(['Passed', 'Failed', 'No tests ran', 'Timed out', 'Sandbox unavailable'])
+const OUTCOMES = new Set(['passed', 'failed', 'error', 'skipped'])
+const MAX_CASES = 2000
+const MAX_TEXT = 1000
+// What PUT /runs/:id/tests may still set: the sandbox profile, never results.
+export const SANDBOX_FIELDS = ['image', 'network', 'memory', 'cpu', 'timeout']
+
+const isCount = (n) => Number.isInteger(n) && n >= 0
+const isText = (v) => typeof v === 'string' && v.length <= MAX_TEXT
+
+function validTestRun(f) {
+  if (!isPlainObject(f) || typeof f.fingerprint !== 'string' || !FINGERPRINT.test(f.fingerprint)) return false
+  if (!VERDICTS.has(f.status)) return false
+  if (![f.passed, f.failed, f.total].every(isCount)) return false
+  if (f.skipped !== undefined && !isCount(f.skipped)) return false
+  for (const k of ['iterations', 'duration_ms']) if (f[k] !== undefined && f[k] !== null && !isCount(f[k])) return false
+  if (f.output !== undefined && typeof f.output !== 'string') return false
+  for (const k of SANDBOX_FIELDS) if (f[k] !== undefined && !isText(f[k])) return false
+  const cases = f.cases ?? []
+  if (!Array.isArray(cases) || cases.length > MAX_CASES) return false
+  const goodCase = (c) => isPlainObject(c) && isText(c.name) && isText(c.file) && OUTCOMES.has(c.outcome) && typeof c.new === 'boolean'
+  if (!cases.every(goodCase)) return false
+  const missing = f.missing_existing ?? []
+  if (!(Array.isArray(missing) && missing.length <= MAX_CASES && missing.every(isText))) return false
+  // The counts must add up, and "Passed" must agree with them: the same rule
+  // the sandbox applies (agents/app/sandbox.py verdict()), checked again here
+  // because this is where Gate 3's decision is made.
+  if (f.total !== f.passed + f.failed) return false
+  if (f.status === 'Passed') {
+    if (f.failed !== 0 || f.passed === 0 || missing.length) return false
+    if (cases.some((c) => c.outcome === 'failed' || c.outcome === 'error')) return false
+  }
+  return true
+}
+
+export async function latestTestRun(db, runId) {
+  const res = await db.query('SELECT * FROM test_runs WHERE run_id = $1 ORDER BY seq DESC LIMIT 1', [runId])
+  return res.rows[0] ?? null
+}
+
+// The one rule for approving Gate 3 (B7), used by the dashboard view and by
+// the approve itself: the latest test run must have run on the exact code
+// that was handed over for review, and passed.
+export function reviewEvidence(fingerprint, latest) {
+  let reason = null
+  if (!fingerprint) reason = 'no_fingerprint'
+  else if (!latest) reason = 'untested'
+  else if (latest.fingerprint !== fingerprint) reason = 'code_changed'
+  else if (latest.status !== 'Passed') reason = 'tests_not_passed'
+  return { fingerprint: fingerprint ?? null, testRunId: latest?.id ?? null, approvable: reason === null, reason }
+}
+
+// Store one test run. Only while the run is at Code: once the code is handed
+// over for review the evidence is frozen (B6), so nothing can be slipped in
+// at Gate 3. Returns { id, seq } or { error: 'bad_test_run' | 'not_found' | 'wrong_step' }.
+export async function recordTestRun(db, runId, fields = {}, { agent } = {}) {
+  if (!validTestRun(fields)) return { error: 'bad_test_run' }
+  return withTransaction(db, async (tx) => {
+    const run = (await tx.query('SELECT step FROM runs WHERE run_id = $1 FOR UPDATE', [runId])).rows[0]
+    if (!run) return { error: 'not_found' }
+    if (run.step !== 'code') return { error: 'wrong_step', step: run.step }
+    const seq = (await tx.query('SELECT count(*)::int AS n FROM test_runs WHERE run_id = $1', [runId])).rows[0].n + 1
+    const id = randomUUID()
+    await tx.query(
+      `INSERT INTO test_runs (id, run_id, seq, fingerprint, status, passed, failed, skipped, total, iterations,
+                              duration_ms, output, cases, missing_existing, recorded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [id, runId, seq, fields.fingerprint, fields.status, fields.passed, fields.failed, fields.skipped ?? 0,
+        fields.total, fields.iterations ?? null, fields.duration_ms ?? null, fields.output ?? null,
+        JSON.stringify(fields.cases ?? []), JSON.stringify(fields.missing_existing ?? []), agent ? `agent:${agent}` : null],
+    )
+    const profile = Object.fromEntries(SANDBOX_FIELDS.filter((k) => fields[k] !== undefined).map((k) => [k, fields[k]]))
+    if (Object.keys(profile).length) await upsertTests(tx, runId, profile)
+    else await touchRun(tx, runId)
+    return { id, seq }
+  })
+}
+
+// Upsert the run's sandbox profile (manual upsert for pg-mem). Results are
+// never stored here; they are test runs (recordTestRun).
 export async function upsertTests(db, runId, fields = {}) {
   const cols = ['status', 'image', 'network', 'memory', 'cpu', 'timeout', 'passed', 'failed', 'total', 'iterations', 'duration_ms', 'output']
   const exists = await db.query('SELECT 1 FROM test_results WHERE run_id = $1', [runId])
@@ -510,3 +627,4 @@ export async function upsertTests(db, runId, fields = {}) {
   }
   await touchRun(db, runId)
 }
+

@@ -33,14 +33,18 @@ class HttpReporter:
         self._httpx.put(f"{self.base}/runs/{run_id}/phases/{key}", json=_metrics_only(fields),
                         headers=auth_headers(), timeout=8)
 
-    def action(self, run_id: str, action: str, artifacts: dict | None = None, details: dict | None = None):
+    def action(self, run_id: str, action: str, artifacts: dict | None = None, details: dict | None = None,
+               fingerprint: str | None = None):
         """Hand a finished step to the backend, which moves the run if allowed.
-        A refusal raises, so the pipeline stops instead of carrying on."""
+        A refusal raises, so the pipeline stops instead of carrying on.
+        request_review carries the fingerprint of the code under review (B7)."""
         body: dict = {}
         if artifacts:
             body["artifacts"] = artifacts
         if details:
             body["details"] = details
+        if fingerprint:
+            body["fingerprint"] = fingerprint
         resp = self._httpx.post(f"{self.base}/runs/{run_id}/actions/{action}", json=body,
                                 headers=auth_headers(), timeout=8)
         resp.raise_for_status()
@@ -55,8 +59,12 @@ class HttpReporter:
             timeout=8,
         )
 
-    def tests(self, run_id: str, **fields):
-        self._httpx.put(f"{self.base}/runs/{run_id}/tests", json=fields, headers=auth_headers(), timeout=8)
+    def test_run(self, run_id: str, **fields) -> dict:
+        """Record a test run (results, each test, the sandbox profile and the
+        code fingerprint it ran on). Returns the stored run, with its id."""
+        resp = self._httpx.post(f"{self.base}/runs/{run_id}/test-runs", json=fields, headers=auth_headers(), timeout=8)
+        resp.raise_for_status()
+        return resp.json()
 
     def artifacts(self, run_id: str, **fields):
         self._httpx.put(f"{self.base}/runs/{run_id}/artifacts", json=fields, headers=auth_headers(), timeout=8)
@@ -85,9 +93,9 @@ class NullReporter:
     def phase(self, run_id, key, **fields):
         self.phases.append((key, _metrics_only(fields)))
 
-    def action(self, run_id, action, artifacts=None, details=None):
+    def action(self, run_id, action, artifacts=None, details=None, fingerprint=None):
         self.actions.append(action)
-        self.action_bodies.append((action, {"artifacts": artifacts, "details": details}))
+        self.action_bodies.append((action, {"artifacts": artifacts, "details": details, "fingerprint": fingerprint}))
         return {}
 
     def audit(self, run_id, event, payload=None):
@@ -96,8 +104,9 @@ class NullReporter:
     def audit_events(self) -> list[str]:
         return [event for event, _ in self.audits]
 
-    def tests(self, run_id, **fields):
+    def test_run(self, run_id, **fields):
         self.tests_reported.append(fields)
+        return {"id": f"tr-{len(self.tests_reported)}"}
 
     def artifacts(self, run_id, **fields):
         self.artifacts_reported = getattr(self, "artifacts_reported", [])

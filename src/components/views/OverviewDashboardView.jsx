@@ -10,6 +10,7 @@ import { testOutcome } from './TestResultsView'
 export default function OverviewDashboardView({
   run,
   canAct,
+  approveBlocked,
   onApprove,
   onRequestRework,
   onStartPipeline,
@@ -251,7 +252,7 @@ export default function OverviewDashboardView({
           <div className="mt-4 flex-1 space-y-3 text-[12.5px]">
             <div className="flex items-center justify-between">
               <span className="text-muted dark:text-[#a1a1aa]">Ledger Algorithm:</span>
-              <span className="font-mono text-[12px] font-semibold text-ink dark:text-[#f5f5f7]">SHA-256 hash chain</span>
+              <span className="font-mono text-[12px] font-semibold text-ink dark:text-[#f5f5f7]">SHA-256 HMAC</span>
             </div>
 
             <div className="flex items-center justify-between">
@@ -389,9 +390,15 @@ export default function OverviewDashboardView({
                   <RotateCcw size={13} className="text-muted dark:text-[#a1a1aa]" />
                   <span>Request Rework</span>
                 </button>
+                {approveBlocked && (
+                  <span role="note" className="text-[12px] font-medium text-[#d70015] dark:text-[#ff453a]">
+                    {approveBlocked}. Approve is disabled.
+                  </span>
+                )}
                 <button
                   type="button"
                   disabled={!canAct}
+                  title={approveBlocked || undefined}
                   onClick={onApprove}
                   className="rounded-xl bg-[#0071e3] hover:bg-[#0077ed] px-5 py-2 text-[12.5px] font-semibold text-white shadow-sm transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
                 >

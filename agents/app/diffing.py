@@ -10,10 +10,9 @@ import re
 import subprocess
 from typing import Any
 
-from .repository.security import is_sensitive_path
+from .fingerprint import skipped
+from .repository.security import is_sensitive_path, redact_secrets
 
-# Build output that never belongs in a review diff.
-_DIFF_SKIP = ("__pycache__/", ".pytest_cache/")
 # Per-file cap on diff lines sent to the dashboard.
 _MAX_DIFF_LINES = 3000
 
@@ -25,7 +24,9 @@ _GIT_SAFE_DIFF = ("--no-ext-diff", "--no-textconv")
 
 
 def workspace_diff(workspace: str) -> str:
-    """`git diff HEAD` plus every new untracked file, so reviewers see all changes."""
+    """`git diff HEAD` plus every new untracked file, so reviewers see all
+    changes. Secret values are hidden (D3): the diff goes to the robot and
+    to the dashboard."""
     if not os.path.isdir(os.path.join(workspace, ".git")):
         return ""
 
@@ -35,13 +36,15 @@ def workspace_diff(workspace: str) -> str:
         return proc.stdout
 
     parts = [git("diff", *_GIT_SAFE_DIFF, "HEAD")]
-    untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    # Every new file, including ones .gitignore hides: whatever runs in the
+    # sandbox must be visible to the reviewer (a conftest.py could be ignored).
+    untracked = git("ls-files", "--others", "-z").split("\0")
     for path in sorted(p for p in untracked if p):
-        if any(skip in path for skip in _DIFF_SKIP) or is_sensitive_path(path):
+        if skipped(path) or is_sensitive_path(path):
             continue
         # --no-index exits 1 when the files differ, which is always the case here.
         parts.append(git("diff", *_GIT_SAFE_DIFF, "--no-index", "--", "/dev/null", path))
-    return "".join(parts)
+    return redact_secrets("".join(parts))[0]
 
 
 def diff_artifacts(diff_text: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:

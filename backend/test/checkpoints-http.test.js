@@ -8,6 +8,7 @@ import { createApp } from '../src/app.js'
 import { getRun } from '../src/runs/service.js'
 import { asAgent, asReviewer } from './helpers/auth.js'
 import { freshDb } from './helpers/db.js'
+import { FP, PASSING } from './helpers/evidence.js'
 
 async function setup() {
   const db = await freshDb()
@@ -27,7 +28,12 @@ async function setup() {
   return { db, call, requester, planner, engineer, agent, close: () => server.close() }
 }
 
-const act = (ctx, action) => ctx.call('POST', `/runs/RUN-H/actions/${action}`, ctx.agent, {})
+// request_review is preceded by a passing test run and carries its fingerprint (B7).
+async function act(ctx, action) {
+  if (action !== 'request_review') return ctx.call('POST', `/runs/RUN-H/actions/${action}`, ctx.agent, {})
+  await ctx.call('POST', '/runs/RUN-H/test-runs', ctx.agent, PASSING) // refused (409) when not at Code
+  return ctx.call('POST', '/runs/RUN-H/actions/request_review', ctx.agent, { fingerprint: FP })
+}
 const decide = (ctx, who, body) => ctx.call('POST', '/runs/RUN-H/decide', who, body)
 
 async function toGate3(ctx) {
@@ -391,14 +397,16 @@ test('a robot action can attach details to its one audit entry', async () => {
     await decide(ctx, ctx.engineer, { decision: 'approve' })
     const before = (await getRun(ctx.db, 'RUN-H')).auditChain.length
     const res = await ctx.call('POST', '/runs/RUN-H/actions/request_review', ctx.agent, {
-      details: { summary: 'Added y.', files: ['app.py'] },
+      fingerprint: FP, details: { summary: 'Added y.', files: ['app.py'] },
     })
     assert.equal(res.status, 200)
     const chain = (await res.json()).auditChain
     assert.equal(chain.length, before + 1)
-    assert.deepEqual(chain.at(-1).payload, { from: 'code', to: 'g3', details: { summary: 'Added y.', files: ['app.py'] } })
+    assert.deepEqual(chain.at(-1).payload, {
+      from: 'code', to: 'g3', fingerprint: FP, testRun: null, details: { summary: 'Added y.', files: ['app.py'] },
+    })
     // details must be an object, and cannot override from / to
-    assert.equal((await ctx.call('POST', '/runs/RUN-H/actions/request_review', ctx.agent, { details: 'x' })).status, 400)
+    assert.equal((await ctx.call('POST', '/runs/RUN-H/actions/request_review', ctx.agent, { fingerprint: FP, details: 'x' })).status, 400)
   } finally {
     ctx.close()
   }

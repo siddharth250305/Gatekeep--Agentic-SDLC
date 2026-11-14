@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -19,6 +20,7 @@ from ..repository.context import build_context
 from ..repository.tools import WorkspaceTools
 from ..backend_auth import auth_headers
 from ..diffing import diff_artifacts, workspace_diff
+from ..fingerprint import tree_fingerprint
 from ..sandbox import SandboxRunner
 from ..workspace import WORKSPACES, validate_run_id
 from .policy import PolicyEngine
@@ -58,6 +60,15 @@ class GateKeepTools:
         self.session_manager = session_manager
         self.policy = PolicyEngine()
         self.base_url = base_url or os.getenv("GATEKEEP_API", "http://localhost:4040")
+        # One lock per run: a write, a test run and a review request on the
+        # same workspace never interleave, so the fingerprint handed over at
+        # "request review" is the code that was actually there (B6, B7).
+        self._run_locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _run_lock(self, run_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._run_locks.setdefault(run_id, threading.Lock())
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -207,7 +218,9 @@ class GateKeepTools:
             "restrictions": [
                 "Do not modify .env or secret files",
                 "All code changes must go through apply_patch or write_file",
-                "Tests must pass in Docker sandbox before approval",
+                "run_tests always runs the whole suite; existing tests must keep running",
+                "Gate 3 can only approve the exact code of a passing test run",
+                "After request_approval the workspace is frozen until a reviewer decides",
                 "Human approval is required at every gate",
             ],
         }
@@ -288,24 +301,50 @@ class GateKeepTools:
 
     # ── coding ───────────────────────────────────────────────────────────
 
+    def _frozen_refusal(self, session: McpSession, wt: WorkspaceTools, tool: str, path: str) -> dict[str, Any] | None:
+        """B6: while a review is pending the workspace is frozen. The freeze
+        lifts only when the backend says the run is back at Code (Gate 3 sent
+        the work back); any other answer, or no answer, keeps it frozen."""
+        if not wt.is_frozen():
+            return None
+        run = self.get_run(session.session_id)
+        if self.policy.current_phase(run) == "code":
+            wt.thaw()
+            return None
+        denial = {
+            "error": "The workspace is frozen: the code was handed over for review at Gate 3. "
+                     "No file can change unless the reviewer sends the work back.",
+            "frozen": True, "path": path, "tool": tool,
+        }
+        self._audit(session.run_id, "mcp.policy.denied", denial)
+        return denial
+
     def apply_patch(self, session_id: str, path: str, find: str, replace: str) -> dict[str, Any]:
         """Apply a surgical code edit in the workspace (find → replace)."""
         session = self._get_session(session_id)
         wt = self._get_workspace_tools(session_id)
-        with _undo_on_failure(wt._safe(path)):
-            result = wt.apply_patch(path, find, replace)
-            self._audit(session.run_id, "mcp.file.patched",
-                        {"path": path, "applied": result.get("applied")}, required=True)
+        with self._run_lock(session.run_id):
+            refusal = self._frozen_refusal(session, wt, "apply_patch", path)
+            if refusal:
+                return refusal
+            with _undo_on_failure(wt._safe(path)):
+                result = wt.apply_patch(path, find, replace)
+                self._audit(session.run_id, "mcp.file.patched",
+                            {"path": path, "applied": result.get("applied")}, required=True)
         return result
 
     def write_file(self, session_id: str, path: str, content: str) -> dict[str, Any]:
         """Write or overwrite a file in the workspace."""
         session = self._get_session(session_id)
         wt = self._get_workspace_tools(session_id)
-        with _undo_on_failure(wt._safe(path)):
-            result = wt.write_file(path, content)
-            self._audit(session.run_id, "mcp.file.written",
-                        {"path": path, "bytes": result.get("bytes")}, required=True)
+        with self._run_lock(session.run_id):
+            refusal = self._frozen_refusal(session, wt, "write_file", path)
+            if refusal:
+                return refusal
+            with _undo_on_failure(wt._safe(path)):
+                result = wt.write_file(path, content)
+                self._audit(session.run_id, "mcp.file.written",
+                            {"path": path, "bytes": result.get("bytes")}, required=True)
         return result
 
     def get_diff(self, session_id: str) -> str:
@@ -320,36 +359,50 @@ class GateKeepTools:
     # ── testing ──────────────────────────────────────────────────────────
 
     def run_tests(self, session_id: str, target: str | None = None) -> dict[str, Any]:
-        """Execute tests in the Docker sandbox and report results to the backend."""
+        """Run the project's whole test suite in the Docker sandbox and record
+        the result as a test run bound to the code fingerprint (C2, C3, B7).
+
+        *target* is accepted for older clients but never narrows the run: the
+        existing tests always run alongside the robot's new ones."""
         session = self._get_session(session_id)
         workspace = self._workspace_path(session)
 
-        runner = SandboxRunner()
-        result = runner.run_path(workspace, target)
+        with self._run_lock(session.run_id):
+            fingerprint = tree_fingerprint(workspace)
+            result = SandboxRunner().run_path(workspace)
 
-        # Report to backend
+        test_run_id = None
         try:
-            self._backend_put(f"runs/{session.run_id}/tests", {
+            recorded = self._backend_post(f"runs/{session.run_id}/test-runs", {
+                "fingerprint": fingerprint,
                 "status": result["status"],
                 "passed": result["passed"],
                 "failed": result["failed"],
+                "skipped": result.get("skipped", 0),
                 "total": result["total"],
-                "iterations": 1,
                 "duration_ms": result["duration_ms"],
                 "output": result["output"][:8000],
+                "cases": result.get("cases", [])[:2000],
+                "missing_existing": result.get("missing_existing", []),
             })
+            test_run_id = recorded.get("id")
         except BACKEND_ERRORS as exc:
             log.warning("test report warning: %s", exc)
 
         self._audit(session.run_id, "mcp.tests.run", {
-            "target": target,
+            "test_run": test_run_id,
+            "fingerprint": fingerprint,
             "status": result["status"],
             "exit_code": result["exit_code"],
             "passed": result["passed"],
             "failed": result["failed"],
         })
 
-        return result
+        out = {**result, "test_run_id": test_run_id, "fingerprint": fingerprint}
+        if target:
+            out["note"] = (f"GateKeep always runs the whole test suite; the target {target!r} "
+                           "did not narrow the run.")
+        return out
 
     def get_test_results(self, session_id: str) -> dict[str, Any]:
         """Get the latest test results from the run."""
@@ -363,16 +416,45 @@ class GateKeepTools:
 
     def request_approval(self, session_id: str, summary: str) -> dict[str, Any]:
         """Ask for code review: the backend moves the run from Code to Gate 3
-        (B3) and stores the summary and the full diff with that move."""
+        (B3) and stores the summary and the full diff with that move.
+
+        The workspace is frozen first and the code fingerprint goes with the
+        move (B6, B7). If the backend refuses, the freeze is lifted again."""
         session = self._get_session(session_id)
         run = self.get_run(session_id)
 
         if run.get("status") == "awaiting_gate":
             return {"already_awaiting": True, "gate": run.get("gate")}
 
+        workspace = self._workspace_path(session)
+        wt = WorkspaceTools(workspace)
+        with self._run_lock(session.run_id):
+            fingerprint = tree_fingerprint(workspace)
+            wt.freeze(fingerprint)
+            try:
+                result = self._hand_over(session, run, workspace, summary, fingerprint)
+            except Exception:
+                # The move may have gone through even though no answer came
+                # back: lift the freeze only if the run is certainly not at Gate 3.
+                self._thaw_unless_in_review(session, wt)
+                raise
+            if not result.get("requested"):
+                wt.thaw()
+        return result
+
+    def _thaw_unless_in_review(self, session: McpSession, wt: WorkspaceTools) -> None:
+        try:
+            run = self.get_run(session.session_id)
+        except BACKEND_ERRORS:
+            return  # unknown: stay frozen (fail closed); a later write asks again
+        if self.policy.current_phase(run) == "code":
+            wt.thaw()
+
+    def _hand_over(self, session: McpSession, run: dict[str, Any], workspace: str,
+                   summary: str, fingerprint: str) -> dict[str, Any]:
         # The summary and the full diff go with the move, so the reviewer sees the actual changes.
         try:
-            files, diff = diff_artifacts(workspace_diff(self._workspace_path(session)))
+            files, diff = diff_artifacts(workspace_diff(workspace))
         except DIFF_ERRORS as exc:
             log.warning("diff warning: %s", exc)
             files, diff = [], None
@@ -394,6 +476,7 @@ class GateKeepTools:
 
         ok, body = self._robot_action(session.run_id, "request_review", {
             "artifacts": artifacts,
+            "fingerprint": fingerprint,
             "details": {"summary": summary[:500], "files": [f["path"] for f in files]},
         })
         if not ok:
@@ -403,7 +486,9 @@ class GateKeepTools:
             "step": body.get("step"),
             "status": body.get("status"),
             "gate": body.get("gate"),
-            "message": "Gate 3: a human Engineer has been asked to review the code on the dashboard.",
+            "fingerprint": fingerprint,
+            "message": "Gate 3: a human Engineer has been asked to review the code on the dashboard. "
+                       "The workspace is frozen until they decide.",
         }
 
     def get_approval_status(self, session_id: str) -> dict[str, Any]:

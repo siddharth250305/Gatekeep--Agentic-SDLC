@@ -1,9 +1,16 @@
 // Seed demo runs matching the frontend, with REAL audit events so verify works
 // and the tamper demo has a live target. Idempotent: skips runs that exist.
 
-import { cancelRun, createRun, decideGate, recordPhaseMetrics, robotAction, upsertTests, upsertArtifacts } from './service.js'
+import { createHash } from 'node:crypto'
+import { cancelRun, createRun, decideGate, recordPhaseMetrics, recordTestRun, robotAction, upsertArtifacts } from './service.js'
 
-const SANDBOX = { status: 'Completed', image: 'python:3.12-slim', network: 'Disabled', memory: '512 MB', cpu: '1 core', timeout: '30 seconds' }
+const SANDBOX = { image: 'python:3.12-slim', network: 'Disabled', memory: '512 MB', cpu: '1 core', timeout: '30 seconds' }
+
+// Demo code fingerprints (B7): a test run and the review request carry the same one.
+const demoFingerprint = (runId) => createHash('sha256').update(`${runId} demo code`).digest('hex')
+
+// Demo test cases: the project's existing test plus the agent's new ones (C3).
+const demoCases = (outcomes) => outcomes.map(([name, file, outcome, isNew]) => ({ name, file, outcome, new: isNew }))
 
 async function has(db, runId) {
   const r = await db.query('SELECT 1 FROM runs WHERE run_id = $1', [runId])
@@ -77,8 +84,10 @@ const DEMO = {
 
 async function walk(db, runId, moves) {
   for (const m of moves) {
-    const out = m.robot
-      ? await robotAction(db, runId, m.robot, { agent: 'seed' })
+    const out = m.testRun
+      ? await recordTestRun(db, runId, { fingerprint: demoFingerprint(runId), ...SANDBOX, ...m.testRun }, { agent: 'seed' })
+      : m.robot
+      ? await robotAction(db, runId, m.robot, { agent: 'seed', fingerprint: demoFingerprint(runId) })
       : m.cancel
         ? await cancelRun(db, runId, { user: m.by, feedback: m.feedback })
         : await decideGate(db, runId, { decision: m.decide, target: m.target, user: m.by, feedback: m.feedback })
@@ -98,7 +107,6 @@ export async function seed(db) {
     await recordPhaseMetrics(db, 'RUN-0427', 'req', { cost_usd: 0.12, input_tokens: 2800, output_tokens: 1380, model: 'agent-model', duration_ms: 96000 })
     await recordPhaseMetrics(db, 'RUN-0427', 'design', { cost_usd: 0.16, input_tokens: 4100, output_tokens: 2140, model: 'agent-model', duration_ms: 148000 })
     await recordPhaseMetrics(db, 'RUN-0427', 'code', { cost_usd: 0.14, input_tokens: 5200, output_tokens: 2800, model: 'agent-model', duration_ms: 267000 })
-    await upsertTests(db, 'RUN-0427', { ...SANDBOX, passed: 14, failed: 0, total: 14, iterations: 2, duration_ms: 267000 })
     await upsertArtifacts(db, 'RUN-0427', RUN_0427_ARTIFACTS)
     // Waiting at Gate 3 for an Engineer.
     await walk(db, 'RUN-0427', [
@@ -106,6 +114,17 @@ export async function seed(db) {
       { decide: 'approve', by: DEMO.planner },
       { robot: 'submit_design' },
       { decide: 'approve', by: DEMO.engineer },
+      {
+        testRun: {
+          status: 'Passed', passed: 4, failed: 0, total: 4, iterations: 2, duration_ms: 267000, output: '4 passed',
+          cases: demoCases([
+            ['test_webhook_accepts_valid_payload', 'tests/test_webhook.py', 'passed', false],
+            ['test_allows_60_per_minute', 'tests/test_throttle.py', 'passed', true],
+            ['test_61st_request_gets_429', 'tests/test_throttle.py', 'passed', true],
+            ['test_internal_secret_bypasses_limit', 'tests/test_throttle.py', 'passed', true],
+          ]),
+        },
+      },
       { robot: 'request_review' },
     ])
   } else {
@@ -139,13 +158,22 @@ export async function seed(db) {
     await recordPhaseMetrics(db, 'RUN-0425', 'req', { cost_usd: 0.1, input_tokens: 2400, output_tokens: 1200, duration_ms: 79000 })
     await recordPhaseMetrics(db, 'RUN-0425', 'design', { cost_usd: 0.15, input_tokens: 3900, output_tokens: 2050, duration_ms: 141000 })
     await recordPhaseMetrics(db, 'RUN-0425', 'code', { cost_usd: 0.26, input_tokens: 7500, output_tokens: 4000, duration_ms: 470000 })
-    await upsertTests(db, 'RUN-0425', { ...SANDBOX, passed: 11, failed: 3, total: 14, iterations: 3, duration_ms: 312000 })
     // Sent back from Gate 3, then cancelled.
     await walk(db, 'RUN-0425', [
       { robot: 'submit_requirements' },
       { decide: 'approve', by: DEMO.planner },
       { robot: 'submit_design' },
       { decide: 'approve', by: DEMO.engineer },
+      {
+        testRun: {
+          status: 'Failed', passed: 2, failed: 1, total: 3, iterations: 3, duration_ms: 312000, output: '1 failed, 2 passed',
+          cases: demoCases([
+            ['test_retry_backoff', 'tests/test_scheduler.py', 'passed', false],
+            ['test_retry_gives_up', 'tests/test_scheduler.py', 'passed', false],
+            ['test_retry_under_load', 'tests/test_scheduler.py', 'failed', true],
+          ]),
+        },
+      },
       { robot: 'request_review' },
       { decide: 'reject', target: 'code', by: DEMO.reviewer, feedback: 'fake clock leaked into prod path' },
       { cancel: true, by: DEMO.reviewer, feedback: 'superseded by a scheduler rewrite' },

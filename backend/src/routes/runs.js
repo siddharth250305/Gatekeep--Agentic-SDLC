@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import {
   createRun, listRuns, getRun, recordPhaseMetrics, PhaseStateError, upsertTests, decideGate, cancelRun, robotAction,
-  claimStart, releaseStart, writeStepArtifacts, upsertRepoContext, addComment, deleteComment,
+  claimStart, releaseStart, writeStepArtifacts, upsertRepoContext, addComment, deleteComment, recordTestRun, SANDBOX_FIELDS,
 } from '../runs/service.js'
 import { actorName, requireAgent, requireAny, requireHuman } from '../auth/middleware.js'
 
@@ -23,6 +23,12 @@ const REFUSALS = {
   unknown_step: [409, () => 'the run has no known step, so nothing can move it'],
   bad_actor: [403, () => 'forbidden'],
   wrong_step: [409, (o) => `only the work of the current step can be written (the run is at '${o.step}')`],
+  fingerprint_required: [400, () => 'request_review needs the fingerprint (64 hex characters) of the code being handed over'],
+  bad_test_run: [400, () => 'a test run needs a fingerprint, a known status, whole-number counts, and well-formed cases'],
+  no_fingerprint: [409, () => 'Gate 3 cannot approve: no code fingerprint was handed over with the review request'],
+  untested: [409, () => 'Gate 3 cannot approve: no test run was recorded for this code'],
+  code_changed: [409, () => 'Gate 3 cannot approve: the code changed after the last test run'],
+  tests_not_passed: [409, () => 'Gate 3 cannot approve: the last test run on this code did not pass'],
 }
 
 function refuse(res, out) {
@@ -190,8 +196,8 @@ export function runsRouter(db, broadcast = () => {}) {
   // move is allowed from where the run is. Repeating one returns 200 unchanged.
   r.post('/runs/:runId/actions/:action', requireAgent, wrap(async (req, res) => {
     const { runId, action } = req.params
-    const { details, artifacts } = req.body || {}
-    const out = await robotAction(db, runId, action, { agent: req.principal.name, details, artifacts })
+    const { details, artifacts, fingerprint } = req.body || {}
+    const out = await robotAction(db, runId, action, { agent: req.principal.name, details, artifacts, fingerprint })
     if (out.error) return refuse(res, out)
     if (!out.unchanged) touched(runId)
     res.json(out.run)
@@ -212,10 +218,26 @@ export function runsRouter(db, broadcast = () => {}) {
     res.json(await getRun(db, req.params.runId))
   }))
 
+  // The sandbox profile only (image, limits). Results are test runs: they
+  // carry the code fingerprint Gate 3 checks, so they cannot be set here (C2, B7).
   r.put('/runs/:runId/tests', requireAgent, wrap(async (req, res) => {
-    await upsertTests(db, req.params.runId, req.body || {})
+    const body = req.body || {}
+    const other = Object.keys(body).filter((k) => !SANDBOX_FIELDS.includes(k))
+    if (other.length) {
+      return res.status(403).json({ error: `${other.join(', ')} can only be recorded as a test run (POST /runs/:runId/test-runs)` })
+    }
+    await upsertTests(db, req.params.runId, body)
     touched(req.params.runId)
     res.json(await getRun(db, req.params.runId))
+  }))
+
+  // One test run: results, each test, and the fingerprint of the code it ran
+  // on. Only while the run is at Code.
+  r.post('/runs/:runId/test-runs', requireAgent, wrap(async (req, res) => {
+    const out = await recordTestRun(db, req.params.runId, req.body || {}, { agent: req.principal.name })
+    if (out.error) return refuse(res, out)
+    touched(req.params.runId)
+    res.status(201).json(out)
   }))
 
   // Comments are reviewer-only (POST /comments), so an agent cannot add, edit
