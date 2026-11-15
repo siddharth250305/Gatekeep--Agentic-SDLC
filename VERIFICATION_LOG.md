@@ -788,3 +788,117 @@ A throwaway stack again: backend `:4051` (own database), pipeline `:8079` (offli
 - A step that is retried after a crash starts from the workspace as it was left (files written before the crash stay); the model sees them through its tools.
 - Python coverage is not measured (`pytest-cov` is not installed); the Node coverage run was not repeated for this milestone.
 - During the live check a `pkill -f "node src/server.js"` also stopped the user's own dev backend on `:4040`. It was not restarted, because its audit key comes from the user's shell, not from `.gatekeep.local.env`.
+
+---
+
+## Milestone 6: Features That Beat Other Tools (I1, I2, I3, F5 part 2, I4, I5, I6, H2)
+
+Branch `fix/milestone-6-differentiators` (from `fix/milestone-5-architecture-cleanup` at `9967a73`). Nothing is committed yet: the RED/GREEN evidence is kept here, as in Milestones 4 and 5.
+
+**Dependency gate.** I1 none; I2 needs B2 ✓; I3 needs C2 ✓; F5 needs B3 ✓, G2 ✓, I2, I3 (this milestone); I4 needs A1 ✓, A2 ✓; I5 needs D5 ✓; I6 needs B7 ✓, E1 ✓; H2 needs all milestones. All Milestone 0 to 5 items were ticked, and the baseline was green before any change: Python 399, Node 154 + 7 skipped (161 on real Postgres), dashboard 70.
+
+**Which definitions.** The request described I1 to I4 differently from `organised.md` (it called requirement links "I1", drift "I2", budgets "I3"). `organised.md` was followed (I1 = Claude Code and Cursor settings, I2 = design vs code, I3 = requirement IDs and coverage, I4 = team roles and separation of duties), and everything the request described is also covered (budgets and test rules are part of `gatekeep.yaml`; the signed evidence bundle is part of I6).
+
+### What was built
+
+| ID | What | Main code | Tests |
+|---|---|---|---|
+| **I1** | Claude Code: `.claude/settings.json` denies `Bash`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`, `Agent`, `LS`, `BashOutput`, `KillShell`, `Skill`, `SlashCommand`, allows `mcp__gatekeep`, disables bypass mode; a PreToolUse hook on every call is an allowlist (only `mcp__gatekeep__gatekeep_*` and `TodoWrite`), broken input exits 2. Cursor: hooks deny every shell command and direct file read and allow MCP only for GateKeep's exact server command under `$GATEKEEP_HOME` (or `$GATEKEEP_MCP_URL`); an always-applied rule. | `integrations/claude-code/`, `integrations/cursor/`, `integrations/README.md` | `backend/test/m6-integrations.test.js` (8) |
+| **I2** | The design must list its files under `## Files` (with the requirements each serves; patterns start with a plain folder and have at most one `**`), parsed on the server from the approved text. Gate 3 gets `trace.drift`: undeclared files, untouched planned files. With `design.enforce: block` the agent cannot write outside the plan and such a change cannot be handed over. | `backend/src/runs/trace.js`, `service.js` (robotAction guard), `agents/app/mcp/policy.py` (`project_denial`) | `m6-units` (plan parsing, drift, fail closed without a plan), `m6-gate3` (refused designs, drift at Gate 3, block mode), `test_m6_policy.py` (block mode writes) |
+| **I3** | `REQ-n` IDs required on submit (a `NO_ACTIONABLE_FEATURE` answer excepted); tests linked by name (`test_req_<n>_...`); every requirement gets planned files, changed files, tests and a status (covered / failing / uncovered); unknown IDs reported. Scope budgets and test rules (`require_new_tests`, `require_requirement_coverage`) block the hand-over and Gate 3. The built-in pipeline's prompts and the offline model produce this structure. | `trace.js`, `policy/governance.js` (`blockingIssues`), `agents/app/graph.py`, `llm.py` | `m6-units`, `m6-gate3`, `test_m6_pr.py` (pipeline output) |
+| **F5 (part 2)** | Gate 3 left column: requirement checklist ("2 of 3 requirements covered", red "Not covered by any test" / "Failing"); right column: planned vs changed table with a red "Not in the approved design" alert, and the `gatekeep.yaml` panel (status, triggered protected paths, "1 of 2 approvals", "Waiting for alice", change size against budget, blocking rules). | `src/components/code-review/TraceChecklist.jsx`, `DriftTable.jsx`, `PolicyPanel.jsx` | `src/milestone6.test.jsx` (3 of 10) |
+| **I4** | Gate 3 approvals are recorded per review round (`gate_approvals`); the run moves to Done only when every rule is met (`min_approvals`, per-path approvals, named reviewers, roles); otherwise `g3.approval_recorded` and the run waits. Requester never counts; `distinct_gate_approvers` excludes the Gate 1/2 approvers; one approval per reviewer; leaving Gate 3 clears the round. Banner: "Approvals: 1 of 2", Approve disabled for someone who already approved or is excluded, toast "your approval is recorded". | `governance.js`, `service.js` (decideGate guard, `transition` hold), `routes/runs.js`, `src/lib/gate.js`, `GateBanner.jsx` | `m6-gate3` (incl. 2 real-Postgres races), `milestone6.test.jsx` |
+| **I5** | `gatekeep.yaml` read from the base commit (`git show HEAD:`), parsed with a no-alias SafeLoader and a JSON round trip, recorded once per run (`PUT /runs/:id/policy`, agent only, write-once, `policy.recorded` audit entry), validated in one place (unknown settings are errors). Enforced in `GateKeepTools.call` before any workspace tool (forbidden paths in any letter case and through shortcuts, denied tools, design block, governed files) and at the hand-over / Gate 3 (budgets, coverage, new tests, forbidden paths, protected-path approvals). Invalid policy: every tool except status and every approval refused, only Cancel works; unread policy: no hand-over; unreadable (git error): nothing is written. | `agents/app/project_policy.py`, `agents/app/mcp/tools.py` (`_ensure_policy`, `_real_path_denial`), `backend/src/policy/*`, `docs/gatekeep.example.yaml` | `m6-units`, `m6-gate3`, `test_m6_policy.py`; the shared pattern definition `backend/test/fixtures/glob-cases.json` is run by both languages |
+| **I6** | Signed evidence bundle of a finished run (requirements and IDs, design and plan, policy, traceability, governance, approved fingerprint and files, test run, approvals, whole audit chain with sealed head and the server's HMAC result), Ed25519 key derived from the audit key (HKDF), public key at `GET /evidence/public-key`. `verify.js` (no dependencies) checks it offline: signature, pinned key, chain links, server HMAC, gates in order (move events only), human approvals and not the requester, approved code and test run, tests passed, team rules, and with `--tree` the checkout. `GET /runs/:id/pr` builds the PR description (coverage, planned vs changed, policy, full approval history, escaped). `POST /runs/:id/pull-request` (Engineer/Admin) has the agent service push `gatekeep/<run>` with `.gatekeep/evidence/<run>.json` and open the GitHub PR; refused when the workspace is no longer the approved code, when a file hidden from review would be committed, or for a non-GitHub repo; recorded once (`run.pr_created`). GitHub Actions template for a required check. Dashboard: "Download evidence" and "Create pull request" on a finished run. | `backend/src/evidence/bundle.js`, `verify.js`, `routes/evidence.js`, `agents/app/pr.py`, `main.py`, `integrations/github/gatekeep-check.yml`, `src/components/RunExport.jsx` | `m6-evidence.test.js` (16), `test_m6_pr.py` (20), `milestone6.test.jsx` |
+| **H2** | README (linked requirements, project rules, team approvals, evidence, lock-in, honest limits, real counts), MCP guide (Claude Code setup, hand-over rules, guarantees 5 to 8), agents README (`GATEKEEP_WORKSPACE_ROOT`, `GIT_TOKEN`), `integrations/README.md`, example `gatekeep.yaml` (checked: validates with no errors). | docs | n/a |
+
+Also: `GATEKEEP_WORKSPACE_ROOT` (the Milestone 5 leftover "per-deployment workspace root") so the live check never touches `agents/workspaces`; the demo seed now uses REQ IDs and linked test names and records a policy before its hand-overs.
+
+### Test-first evidence (T1)
+
+| Round | RED (before the fix) | GREEN (after) |
+|---|---|---|
+| Milestone items | Node: `m6-units` and `m6-evidence` `ERR_MODULE_NOT_FOUND` (`src/policy/glob.js`, `src/evidence/bundle.js`); `m6-gate3` **17/17 failed** (`PUT /policy` 404, requirements without IDs accepted 200 vs 400, hand-over without policy accepted 200 vs 409); `m6-integrations` **8/8 failed** (`Bash` not denied, no guard). Python: both files failed at collection (`ImportError: cannot import name 'pr'` / `project_policy`). Dashboard: **10/10 failed**. | all green |
+| Older tests that the new rules changed | 51 backend failures after the service change: hand-overs without a recorded policy (`policy_unknown`) in the shared helpers, the demo seed and 4 tests counting audit entries; 8 Python failures in other test doubles (no `PUT /policy` route, a fixture run without a policy, `policy.recorded` not in the allowed agent events). | Helpers/seed record the policy first; counts +1; doubles updated. One real code fix came out of it: `_ensure_policy` no longer trusts a PUT answer that does not carry the policy (it reads the run again). |
+| Real-Postgres guard test | "two reviewers approving at the same moment" **failed**: `[200, 409]`, the second reviewer got "a decision for this run is already in progress" (the in-process lock was per run). | Lock keyed per run and reviewer; the row lock still serializes; 2/2 green (one `g3.approval_recorded`, one `g3.approved`, chain verified). |
+| Live-check finding | Python: **2 failed**: a 200 answer from GitHub was reported as a refusal; a retry after a GitHub failure died at `git commit` ("nothing to commit") because the branch was already pushed. | Any 2xx accepted, retry commits `--allow-empty`, git errors name the git command; 17/17. |
+| ECC review findings | Node: `m6-units` **hung** for 313 s on the many-`**` pattern (catastrophic backtracking), `m6-evidence` 5 failed, `m6-gate3` 1, `m6-integrations` 3. Python: **22 failed** (nested `.gatekeep` / `__pycache__` writes allowed, shortcut into `.gatekeep`, control characters, case, git error read as "no policy", YAML dates/aliases crash, newline / `//` / `/./` patterns, hidden files committed to the PR, symlinked evidence path, existing PR on retry). | all green (see the review table). |
+
+Test corrections made while going GREEN: the `request_approval` ordering test first called `run_tests` (which already records the policy); the forbidden-path test used `*.pem`, which the built-in secret list already blocks; the coverage list query also counted nested test-name items; one test inserted between a `parametrize` decorator and its function; the evidence check list gained `team_rules`; the B1 artifacts test's stored draft now has a REQ ID (stored requirements are now checked too).
+
+### "Done when" acceptance verification
+
+| # | Criterion (organised.md) | Automated proof | Live proof |
+|---|---|---|---|
+| 1 | With the shipped Claude Code settings, the robot cannot edit files or run shell commands except through GateKeep | `m6-integrations.test.js`: every built-in that reads/edits/runs/fetches denied with a GateKeep message, other MCP servers and look-alike names (`mcp__gatekeep__x__…`) denied, broken input exits 2, settings deny list and hook wiring checked | Not run inside a real Claude Code session (it would spend the account's usage; the session limit had just been hit). The hook follows Claude Code's documented PreToolUse input/output format. |
+| 2 | Gate 3 shows a red warning for any file changed outside the approved design | `m6-units` drift, `m6-gate3` "Gate 3 shows the files changed outside the approved design", `milestone6.test.jsx` (red alert, row "Not in the approved design") | RUN-M6LIVE-B in Chrome: "1 file changed outside the approved design", `README.md` red "Not in the approved design", `payments/audit_log.py` "Planned, not changed" (screenshot taken) |
+| 3 | Every requirement shows which test covers it, and uncovered requirements are highlighted | `m6-units` traceability, `m6-gate3`, `milestone6.test.jsx` | Chrome: "2 of 3 requirements covered"; REQ-1 → `test_req_1_refund_capped_at_charge`, `test_req_1_full_refund_allowed`; REQ-2 red "Not covered by any test". Pipeline run RUN-M6LIVE-A: REQ-3 red |
+| 4 | A finished run creates a Pull Request with the full approval history in its description | `m6-evidence` (PR description, creation recorded once, refusals), `test_m6_pr.py` (real git push to a bare remote, GitHub API call, refusals) | "Create pull request" in Chrome → "Pull request #42"; the GitHub API stand-in received `{title, head: gatekeep/RUN-M6LIVE-B, base: main}` with "## Approval history" naming erin and bob; the branch on the origin holds the approved code + `.gatekeep/evidence/RUN-M6LIVE-B.json`; `verify.js … --tree` on a fresh clone of the branch: **PASS, 9/9 checks** |
+
+### Review findings (ECC code-reviewer, security-reviewer)
+
+The first two review agents stopped on the account's session limit; both were run again after it reset. Both found the same HIGH issue; no CRITICAL.
+
+| Finding | Result |
+|---|---|
+| HIGH (both): `.gatekeep` was skipped at any depth, so the robot could write `pkg/.gatekeep/payload.py`: left out of the fingerprint, diff and sandbox, then committed by `git add -A` into the PR under a valid signature (same for `__pycache__`, `.pytest_cache`, and a shortcut into `.gatekeep`) | **Fixed**: `.gatekeep` is skipped only at the top (Python and `verify.js`, one helper used by fingerprint, sandbox copy and diff); the robot can never write a path with any hidden folder, in any letter case, also through a shortcut (real-path check); the PR step refuses if any file hidden from review would be committed. Tests in both languages. |
+| MEDIUM (both): a git error while reading `gatekeep.yaml` was recorded as "no policy", write-once | **Fixed**: absence is checked with `git ls-tree`; any git error raises and nothing is written or recorded. Tests added. |
+| MEDIUM (both): glob gaps: trailing `**` did not match newlines (JS also `\r`), `//` and `/./` not normalized, case on macOS, `?` code unit vs code point | **Fixed**: DOTALL / `[\s\S]`, `u` flag, `//` and `/./` collapsed, control characters refused in tool paths, forbidden paths matched in any case at write time; 7 shared fixture cases added. |
+| MEDIUM (security): ReDoS from robot-written plan patterns; a plan entry `**` empties design enforcement | **Fixed**: repeated `**/` collapse to one (both languages); plan patterns must start with a plain folder and have at most one `**`, max 300 characters. Test proves a 2,000-folder path answers in < 200 ms (it hung before). |
+| MEDIUM (both): YAML dates/aliases crashed the tool call or could blow up | **Fixed**: no-alias SafeLoader, JSON round trip, any failure becomes an invalid policy. Tests added. |
+| MEDIUM (security): symlinks on the PR evidence path | **Fixed**: refused (`unsafe_evidence_path`). Test added. |
+| MEDIUM (security): a robot work event with `payload.to` broke `gates_in_order` and its `feedback` reached the PR "Approval history" | **Fixed**: the verifier and the PR history read only state-machine move events (`MOVE_EVENTS`). Test added. |
+| MEDIUM (security): Cursor allowlist spoofable by any command mentioning `app/mcp/server.py`; Claude hook prefix collision (`mcp__gatekeep__x__…`); deny list missing tools | **Fixed**: Cursor requires the exact command under `$GATEKEEP_HOME` (or the URL), none set = deny; Claude hook matches `^mcp__gatekeep__gatekeep_[a-z0-9_]+$`; `Agent`, `LS`, `BashOutput`, `KillShell`, `Skill`, `SlashCommand` denied. Tests added. |
+| MEDIUM (security): verifier did not check the team rules; PR description rendered robot text unescaped | **Fixed**: `team_rules` check; requirement text, paths, test names and notes are escaped (no @mentions, links, HTML, table breaks). Tests added. |
+| MEDIUM (code): requirements or design stored earlier (`PUT /artifacts`) skipped validation at the hand-over | **Fixed**: the stored text is validated when no new text comes with the move. Test added. |
+| MEDIUM (code): a PR could exist without its record; retries | **Partly fixed**: a 422 "already exists" now returns the existing PR, so a retry is idempotent. Leftover: if writing the `run.pr_created` entry itself fails after GitHub created the PR, the dashboard offers the button again (the retry then finds the PR). The in-flight guard is per process. |
+| LOW (security): Planners could open PRs with the service token | **Fixed**: Engineer or Admin only. Test added. |
+| LOW (code): duplicate React keys | **Fixed**. |
+| LOW (code): sort order of emoji paths differed between JS and Python fingerprints | **Fixed**: JS sorts by UTF-8 bytes; the shared fingerprint constant now includes such paths. |
+| LOW (code): `oneAtATime` keyed per reviewer weakens double-click protection at Gates 1/2 | **Not changed**: between two gates there is always a robot step, so a second approve can never land on the next gate (it is refused `not_allowed`); the row lock still serializes. |
+| LOW (code): `forbidden_paths` matched the raw path with `..` | **No change needed**: any path with `..` is refused before this check. |
+| LOW (security): any agent token can record the policy first (`{found:false}`) | **Leftover**: the agent token belongs to GateKeep's own services; the robot reaches only MCP tools, and its tools record the real file first. The backend cannot check `sha256` against parsed content. |
+| LOW (security): `distinct_gate_approvers` looks at the latest Gate 1/2 approvers only | **Leftover (by design)**: the code is judged against the requirements and design it stands on. |
+| LOW (code/security): "Create pull request" is shown for every finished run; key rotation changes the public key | **Leftover**: the refusal reason is shown after the click; documented in the README. |
+
+### Automated test suite totals (final)
+
+| Test suite | Result | Details |
+|---|---|---|
+| **Python (`cd agents && .venv/bin/pytest`)** | **492 passed, 0 failed** | +93: `test_m6_policy.py` 73, `test_m6_pr.py` 20. 1 Starlette warning (existed before). |
+| **Node, in-memory (`npm test`)** | **223 passed, 0 failed, 9 skipped** | The 9 skipped need real Postgres |
+| **Node, real Postgres (`npm run test:pg`)** | **232 passed, 0 failed** | +71: `m6-units` 27, `m6-gate3` 20 (2 real-Postgres races), `m6-evidence` 16, `m6-integrations` 8 |
+| **Dashboard (`npm test`, Vitest)** | **80 passed, 0 failed** (8 files) | +10 `src/milestone6.test.jsx`; no component over 400 lines (`App.jsx` 385) |
+| **Frontend build (`npm run build`)** | **Built cleanly** | |
+
+Total: **804 passing tests** (492 + 232 + 80).
+
+### Live check (throwaway stack, ECC Chrome DevTools)
+
+Backend `:4061` with its own database `gatekeep_m6_live`, agent service `:8089` (offline fake model, real `gatekeep-sandbox` Docker image), Vite `:5186`, a local GitHub API stand-in `:8095`, `GATEKEEP_WORKSPACE_ROOT` in the session scratchpad, unique run ids `RUN-M6LIVE-A/B`. Every process was started with its PID recorded and stopped by PID; the database was dropped. The user's dev services (`:8077`, `:5180`) were never touched; `agents/workspaces` was the same before and after (5 entries, `RUN-1001` clean), no freeze marker added.
+
+**RUN-M6LIVE-B (MCP mode).** An outside agent script used only the real `gatekeep_*` MCP tool functions on a small payments repo whose `gatekeep.yaml` forbids `infra/**`, protects `payments/**` (2 approvals), budgets 6 files / 400 lines, and sets `distinct_gate_approvers`. The repo's origin was a local bare repo standing in for GitHub; the run's repo was named `acme/shop`.
+
+| Step | Observed |
+|---|---|
+| Requirements without IDs / design without a file plan | Refused with "requirements must give each requirement an ID…" / "the design must list the files…" |
+| Writes | `infra/deploy.sh` refused ("forbidden by gatekeep.yaml (forbidden_paths: infra/**)"); `gatekeep.yaml`, `GATEKEEP.YAML`, `.gatekeep/evidence/x.json` refused; 4 `mcp.policy.denied` entries; the files on disk unchanged |
+| Tests | Real Docker sandbox: Passed 4/4 (1 existing + 3 named `test_req_1_…`, `test_req_3_…`) |
+| Gate 3 page (erin) | Banner "Approvals: 0 of 2"; coverage 2 of 3 with REQ-2 red; drift alert and table; policy panel `payments/**` 0 of 2, change size 3 of 6 files, 25 of 400 lines |
+| Approvals | erin: "your approval is recorded. Gate 3 needs more approvals", Approve then disabled for her ("You already approved this code…"). eli (approved Gate 2): banner "You approved Gate 2 of this run, so someone else must approve the code", and `curl` straight to the API: **403 `same_approver`**. bob: run complete |
+| Pull request | First click: **finding** ("GitHub refused the PR (200)", fixed test-first, see above). Retry after restarting the agent service: "Pull request #42"; `run.pr_created` recorded; chain verified |
+| Evidence | Fresh clone of `gatekeep/RUN-M6LIVE-B`: `verify.js --public-key … --tree`: PASS (signature, signer_key, chain_links 20, server_hmac, gates_in_order, human_approvals "bob, erin", approved_code, tests_passed, tree). A copy with the Gate 3 actor changed: FAIL signature. One line added to the clone: FAIL tree |
+
+**RUN-M6LIVE-A (pipeline mode, built-in offline model).** Requirements REQ-1..3, a `## Files` plan, 3 linked tests (Passed 3/3); Gate 3 coverage REQ-3 red; no approvals counter (default rule, one approval); bob approved; "Create pull request" refused in the browser with "this run's repository is not a GitHub repository"; its evidence: PASS with `--tree` on the workspace (10 checks, `team_rules` included after the review fixes). Console: one 409 (that refusal).
+
+The branch on the origin has two GateKeep commits (the first attempt and the retry, which re-wrote the evidence file); the evidence describes the final one.
+
+### Known leftovers (not blocking)
+
+- **Real Claude Code session not run** against the shipped settings (see "Done when" 1).
+- **Cursor**: hooks cannot stop the built-in editor before a change; the rule only asks the agent not to use it.
+- **Project settings can be overridden** by a person's own Claude Code settings unless installed as managed settings (documented).
+- **Requirement coverage is by test name**: a test named `test_req_1_…` is trusted to check REQ-1; the reviewer still reads it.
+- The LOW review items marked "Leftover" above; the PR record can still be missed if its audit write fails after GitHub created the PR (a retry finds the existing PR).
+- The GitHub PR flow was proven against a local bare remote and a local API stand-in, not against github.com (no token or repository was used).
+- MCP sessions: each script process in the live check opened its own MCP session, which stayed "active" after the process ended (Milestone 5 leftover: no backend-side expiry).

@@ -66,6 +66,8 @@ Only after Gate 2 is approved can the agent call `apply_patch` or `write_file`. 
 - Every test run is stored with a **fingerprint** (SHA-256) of the exact code it ran on.
 - When the code is ready, the agent calls `request_approval`. The workspace is **frozen** (no more writes), and the run moves from Code to **Gate 3**, a real human step for an Engineer, carrying the fingerprint of the handed-over code.
 - At Gate 3 the reviewer sees three columns on one screen: the approved requirements with the test results, the code diff, and the approved design with the list of changed files. They leave line-level comments if needed (every line has a keyboard-reachable comment button), and either approve (the run is **Done**) or sends the work back to **Code** or to **Design** (which lifts the freeze). The person who asked for the run cannot give this final approval. **Approve only works on the exact tested version:** if the code changed after the last test run, or that run did not pass, Approve is disabled with the reason and the server refuses it. The approval's audit entry records the fingerprint and the test run ID.
+- **Requirements, design, code and tests are linked.** Every requirement has an ID on its own line (`REQ-1: ...`); the backend refuses requirements without IDs. The design lists the files it will change under a `## Files` heading, each with the requirements it serves (``- `app/x.py` (create) [REQ-1]``); a design without a file plan, with a path outside the workspace, or pointing at a requirement that does not exist is refused. A test belongs to a requirement by its name (`test_req_1_...`). All of this is parsed on the server from the exact text the reviewer approved.
+- At Gate 3 the left column is a **requirement checklist**: each requirement with the tests that cover it and their results; a requirement with no passing test is red ("Not covered by any test" or "Failing"). The right column shows **planned vs changed files**: a file changed outside the approved design gets a red warning, a planned file left alone is flagged, and the project's `gatekeep.yaml` rules the change triggered are listed with the approvals they still need.
 
 ### One state machine decides every step change
 The Node backend owns run state ([ADR 0001](docs/adr/0001-node-owns-run-state.md)). Every step change goes through one fixed table of allowed moves (`backend/src/runs/machine.js`):
@@ -84,6 +86,13 @@ The Node backend owns run state ([ADR 0001](docs/adr/0001-node-owns-run-state.md
 Any move not in the table is refused, and an unknown step refuses everything. An Admin may act for any human role. Each move locks the run, and writes exactly one audit entry with the logged-in name and the server's clock, in one database transaction. Pressing Approve twice, or a robot sending the same submission twice, never moves the run twice. There is no other way to change a run's step: the old `PATCH /runs/:id` route is gone, phase rows accept metrics only, and agents cannot write approval or step events into the audit log.
 
 In the dashboard, one **gate banner** on every page says which gate the run is at (for example "Gate 2 of 3: Design review"), who must act, and who you are signed in as, with the only Approve and Request changes buttons. When the server would refuse the click (wrong role, the requester at Gate 3, or code changed after the last test run) the button is disabled and the banner says why. Request changes lets the reviewer pick the step at Gate 3 (Code or Design) and sends only this gate's comments written since its last decision. A step sent back for rework does not keep its old completion time.
+
+### Project rules, team approvals and signed evidence
+
+- **`gatekeep.yaml` in the repository** ([example](docs/gatekeep.example.yaml)) sets the project's own rules: forbidden paths the agent may never write, protected paths that need more Gate 3 approvals or named reviewers, tools the project switches off, design enforcement (`warn` or `block`), change-size budgets, test rules (new tests, requirement coverage) and team rules. GateKeep reads it from the commit the run starts from, never from the agent's working copy, and records it once per run (it cannot change mid-run). The agent can never write `gatekeep.yaml`, `.gatekeep/`, or folders the review cannot see (`__pycache__/`, `.pytest_cache/`). Anything GateKeep does not understand makes the file invalid, and an invalid file stops the run: only Cancel works (fail closed). A git error while reading the file is never taken for "no file".
+- **Team approvals at Gate 3.** The person who asked for the work never approves it. A touched protected path can require several distinct approvals, named reviewers and roles; each approval is recorded (`g3.approval_recorded`) and the run moves to Done only when every rule is met. With `team.distinct_gate_approvers`, whoever approved the requirements or design cannot approve the code. Sending the work back clears the approvals of that round. The banner shows "Approvals: 1 of 2" and disables Approve for someone who already approved or is excluded; the server applies the same rules.
+- **Signed evidence and Pull Requests.** A finished run exports an evidence bundle (requirements, design and plan, policy, traceability, the approved code fingerprint, the test run, every approval and the whole audit chain), signed with an Ed25519 key derived from the audit key. `GET /evidence/public-key` publishes the key. `node backend/src/evidence/verify.js bundle.json --public-key key.pem [--tree dir]` checks it offline, with no access to the server: signature, pinned key, unbroken chain, the server's HMAC check, gates in order, human approvals (not the requester), the approved fingerprint and test run, passing tests, the team rules, and with `--tree` that a checkout is exactly the approved code. **Create pull request** pushes the approved code on `gatekeep/<run>` with the bundle in `.gatekeep/evidence/<run>.json` and opens a GitHub PR whose description holds the requirement coverage, planned vs changed files and the full approval history. It refuses when the workspace is no longer the approved code. [`integrations/github/gatekeep-check.yml`](integrations/github/gatekeep-check.yml) makes the same check a required status check.
+- **No way around GateKeep.** [`integrations/`](integrations/README.md) ships Claude Code settings plus a PreToolUse hook that deny every built-in tool that reads, edits, runs or fetches (an allowlist: only GateKeep's MCP tools pass), and Cursor hooks and rules that deny shell commands and direct file reads.
 
 ---
 
@@ -198,16 +207,19 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 | Test / Metric | Result | What it Means |
 | :--- | :--- | :--- |
-| **Automated Test Suite** | **293 Python + 157 Node + 67 dashboard passing** | Counts are collected test cases (parametrized cases count separately). The 157 Node tests run on a real Postgres (`npm run test:pg`); 7 of them need real locking and are skipped under the in-memory `npm test`. Includes 3 real Docker sandbox tests. |
+| **Automated Test Suite** | **492 Python + 232 Node + 80 dashboard passing** | Counts are collected test cases (parametrized cases count separately). The 232 Node tests run on a real Postgres (`npm run test:pg`); 9 of them need real locking and are skipped under the in-memory `npm test`. Includes 3 real Docker sandbox tests. |
 | **Sensitive File Access** | **Blocked, including through shortcuts** | One block list (`.env*`, keys, `id_*`, credential files, `*.tfstate`, `.ssh/`, `.aws/`, `.git/`, ...). Every tool (read, write, search, file list, repository context) checks the real file behind a symlink, and refuses shortcuts to blocked files or outside the workspace. Secret files are removed from the sandbox copy before tests run. |
 | **Secret Redaction** | **Every output** | File reads, search results, diffs, repository context and test output have secret values replaced with `***`: whole private-key blocks, known token formats, and `key = "value"`, `KEY=value` and `key: value` lines. Search matches on the redacted text, so it cannot confirm a secret value. Pattern-based: an unusual secret format can still slip through. |
 | **Path Traversal Protection** | **Blocked** | `..` segments (with `/` or `\`) are rejected by the policy engine, and every resolved path must stay inside the run workspace. |
 | **Test Result Integrity** | **JUnit report + exit code** | Counts come from pytest's JUnit XML report, never from printed text or the LLM's summary. The whole suite always runs and existing tests must keep running. The agent still writes its own new tests, so a weak new test can pass; test code that attacks pytest itself (a `conftest.py` rewriting the report) is not stopped, but the reviewer sees it in the diff. |
 | **Approval Integrity** | **Exact tested version** | Gate 3 approval is bound to the code fingerprint and the test run ID; the workspace is frozen while review is pending. |
+| **Project policy (`gatekeep.yaml`)** | **Read from the base commit, enforced on every tool call and at Gate 3** | Forbidden paths (any letter case, any shortcut), denied tools and design enforcement are refused before a write; budgets, coverage, new tests and protected-path approvals are checked at the hand-over and at Approve. Invalid or unreadable policy: nothing moves. |
+| **Evidence** | **Ed25519-signed bundle, offline verifier** | Any edit, a dropped audit entry, a different signing key, an agent or requester approval, a failed test run or a checkout that is not the approved code fails the check. |
+| **Agent lock-in (Claude Code)** | **Allowlist hook + deny rules** | Built-in Edit, Write, Bash, Read, WebFetch, Task and every other non-GateKeep tool are denied. Tested with Claude Code's hook input format; see Known Limitations for overrides. |
 | **Network Isolation** | **No network** | The Docker sandbox runs with `--network none`, no Linux capabilities, a read-only code mount and capped memory, CPU, processes and `/tmp`. |
 | **Audit Ledger Verification** | **HMAC + sealed head** | Edited rows (even with recomputed SHA-256), copied rows and deleted newest rows are detected. See the limits in the Audit Ledger section above. |
 | **Live Telemetry Latency** | **< 100 ms** | Agent tool calls and test outputs appear on the React dashboard in real time over WebSockets. A burst of events causes one reload; a dropped connection retries after 1, 2, 4 ... up to 30 s and reloads once when it is back. |
-| **Frontend Build Time** | **~1.1 seconds** | Vite bundles 1,900 modules cleanly with zero warnings. |
+| **Frontend Build Time** | **~1.1 seconds** | Vite bundles the dashboard cleanly with zero warnings. |
 
 ---
 
@@ -215,7 +227,9 @@ I tested GateKeep against automated test suites and common attack vectors:
 
 GateKeep is a student project and is not production-ready yet. The main gaps, explained in simple English in [`drawback.md`](drawback.md) with a fix plan in [`organised.md`](organised.md):
 
-- **Agents with their own tools can go around GateKeep.** Claude Code and Cursor keep their built-in Edit and Bash tools unless you restrict them.
+- **Agent lock-in depends on the shipped settings being installed.** The Claude Code settings in `integrations/` can be overridden by a person's own local settings unless they are installed as managed settings, and Cursor's hooks cannot stop its built-in editor before a change (its rules only ask the agent not to use it). Changes made outside GateKeep never become part of an approved run.
+- **Requirement coverage is by test name** (`test_req_1_...`): a test named after a requirement is trusted to check it; the reviewer still reads the test.
+- **The evidence signing key is derived from the audit key**: rotating `GATEKEEP_AUDIT_KEY` changes the public key, so CI must pin the new key.
 - **Audit log rollback**: a database attacker who kept an old sealed head can roll a run's diary back to that point (no anchor outside the database yet).
 - **Test code runs inside pytest**: a test written to attack pytest itself can still lie about its own results.
 
@@ -273,6 +287,10 @@ pip install -r requirements.txt
 export GATEKEEP_API=http://localhost:4040
 export GATEKEEP_API_TOKEN=gka_...            # from npm run token:create
 export GATEKEEP_PIPELINE_SECRET=...          # same value as the backend
+# Optional: where run workspaces live (default agents/workspaces), and the
+# GitHub token used to push approved runs and open Pull Requests.
+# export GATEKEEP_WORKSPACE_ROOT=/var/lib/gatekeep/workspaces
+# export GIT_TOKEN=github_pat_...
 uvicorn app.main:app --port 8077
 ```
 
@@ -311,6 +329,8 @@ To let Claude Desktop use GateKeep's tools, add this to your `claude_desktop_con
 
 For Cursor (SSE), the MCP server needs `GATEKEEP_MCP_TOKEN` and the client must send it as a bearer token. See [`docs/MCP_GUIDE.md`](docs/MCP_GUIDE.md).
 
+To make sure the agent can only work through GateKeep, copy the ready-made settings from [`integrations/`](integrations/README.md) into the project: Claude Code (`.claude/settings.json`, a PreToolUse guard hook, `.mcp.json`) or Cursor (`.cursor/hooks.json`, rules, `mcp.json`). Add a [`gatekeep.yaml`](docs/gatekeep.example.yaml) to the repository root for the project's own rules.
+
 ---
 
 ## Project Structure
@@ -321,13 +341,17 @@ gatekeeper/
 │   ├── app/
 │   │   ├── mcp/             # MCP tool definitions, session manager, policy engine
 │   │   ├── graph.py         # Pipeline mode: the built-in agent, one step per call
+│   │   ├── project_policy.py # gatekeep.yaml: read from the base commit, path patterns
+│   │   ├── pr.py            # Push an approved run and open its GitHub Pull Request
 │   │   └── sandbox.py       # Docker test runner (--network none)
 │   └── tests/               # Unit and integration test suites
 ├── backend/                 # Node.js orchestration backend
 │   ├── src/
 │   │   ├── server.js        # Express server & WebSocket hub (port 4040)
 │   │   ├── db.js            # PostgreSQL connection pool & schema migration
-│   │   └── runs/            # Run routes, state machine, test runs, seeds
+│   │   ├── runs/            # Run routes, state machine, test runs, traceability (trace.js), seeds
+│   │   ├── policy/          # gatekeep.yaml validation, path patterns, Gate 3 team rules
+│   │   └── evidence/        # Signed evidence bundle, PR description, offline verifier (verify.js)
 ├── src/                     # React 18 review dashboard
 │   ├── components/          # Gate banner, accessible dialog, rework and new-run dialogs
 │   ├── components/layout/   # Header, page tabs, footer
@@ -338,6 +362,7 @@ gatekeeper/
 │   ├── hooks/               # theme, debounced refresh, run actions
 │   ├── App.jsx              # State, live updates and page routing
 │   └── index.css            # Apple HIG theme system with light and dark modes
+├── integrations/            # Claude Code + Cursor settings that lock the agent to GateKeep; GitHub required check
 ├── scripts/                 # Development helper scripts (dev.sh)
 ├── docs/                    # MCP integration guide and architecture notes
 ├── mcp_config.json          # Example Claude Desktop MCP configuration
