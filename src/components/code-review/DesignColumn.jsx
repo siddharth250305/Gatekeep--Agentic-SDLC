@@ -4,10 +4,13 @@ import { DesignCards } from '../specs/DesignCards'
 import { RequirementsRenderer } from '../specs/MarkdownBlocks'
 import { GateBadge } from '../specs/GateBadge'
 import { parseMarkdownBlocks, plannedFiles } from '../../lib/markdown'
+import DriftTable from './DriftTable'
+import PolicyPanel from './PolicyPanel'
 
-// Gate 3, right column (F5 part 1): the design approved at Gate 2 next to the
-// files this run actually changed. Picking a changed file opens its diff.
-// (Planned-vs-changed warnings come in Milestone 6, F5 part 2.)
+// Gate 3, right column (F5): planned vs changed files with a red warning for
+// any change outside the approved design (part 2, I2), the gatekeep.yaml rules
+// the change triggered (I5), the design approved at Gate 2, and the files the
+// run actually changed. Picking a changed file opens its diff.
 export default function DesignColumn({ run, changedFiles, selectedPath, onOpenFile }) {
   const design = run?.design ?? null
   const designIsObject = Boolean(design) && typeof design === 'object' && !Array.isArray(design)
@@ -28,6 +31,9 @@ export default function DesignColumn({ run, changedFiles, selectedPath, onOpenFi
         </h2>
         <GateBadge run={run} stepKey="g2" role="Engineer" />
       </div>
+
+      <DriftTable trace={run?.trace} onOpenFile={onOpenFile} />
+      <PolicyPanel run={run} />
 
       <div className="px-4 py-3">
         {!design ? (

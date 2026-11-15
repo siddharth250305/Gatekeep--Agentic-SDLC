@@ -20,7 +20,8 @@ def gk_tools(tmp_path):
     t = GateKeepTools(session_manager=None, base_url="http://test-backend")
     t._get_session = lambda sid: _session()
     t._workspace_path = lambda session: str(tmp_path)
-    t._fetch_run = lambda session: {"id": "RUN-1", "step": "code", "status": "running"}
+    # The project policy is already recorded (no gatekeep.yaml), as the backend would have it (I5).
+    t._fetch_run = lambda session: {"id": "RUN-1", "step": "code", "status": "running", "policy": {"status": "none"}}
     return t
 
 

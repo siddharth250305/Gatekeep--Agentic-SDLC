@@ -52,3 +52,16 @@ guard lives in the process. A step that fails (model or backend error) is retrie
 for the next gate decision or a restart; the failure is recorded on the run as `pipeline.step.failed` with
 secrets removed. The coding model is offered only the five workspace tools; the hand-over to Gate 3 is done by
 the pipeline itself.
+
+Other settings:
+
+- `GATEKEEP_WORKSPACE_ROOT`: where run workspaces live (default `agents/workspaces`). Give each deployment, or a
+  throwaway test stack, its own folder so runs with the same id never share a workspace.
+- `GIT_TOKEN`: GitHub token for cloning private repositories and for **Create pull request** (I6): the service
+  pushes the approved code on `gatekeep/<run>` with the signed evidence and opens the PR
+  (`POST /pipeline/:id/pull-request`, called by the backend only). `GATEKEEP_GITHUB_API` overrides the API address
+  (tests, GitHub Enterprise).
+
+The project policy (`gatekeep.yaml`, I5) is read from the workspace's base commit (`app/project_policy.py`) and
+recorded with the backend before the first workspace tool runs; `GateKeepTools.call` then enforces it on every
+call (`app/mcp/policy.py`).

@@ -2,7 +2,7 @@
 // and the tamper demo has a live target. Idempotent: skips runs that exist.
 
 import { createHash } from 'node:crypto'
-import { cancelRun, createRun, decideGate, recordPhaseMetrics, recordTestRun, robotAction, upsertArtifacts } from './service.js'
+import { cancelRun, createRun, decideGate, recordPhaseMetrics, recordPolicy, recordTestRun, robotAction, upsertArtifacts } from './service.js'
 
 const SANDBOX = { image: 'python:3.12-slim', network: 'Disabled', memory: '512 MB', cpu: '1 core', timeout: '30 seconds' }
 
@@ -18,7 +18,7 @@ async function has(db, runId) {
 }
 
 const RUN_0427_ARTIFACTS = {
-  requirements: `### Engineering Requirements: Webhook Rate Limiting\n\n#### 1. Problem Statement\nThe checkout webhook is vulnerable to burst traffic and unauthenticated request floods, creating downstream queue starvation and latency spikes in payment reconciliation.\n\n#### 2. User Stories & Acceptance Criteria\n- **AC-1**: Limit webhook invocations to 60 requests per minute per merchant ID (\`merchant_<id>\`).\n- **AC-2**: When limit is exceeded, immediately return HTTP 429 Too Many Requests with header \`Retry-After: 60\`.\n- **AC-3**: Internal reconciliation worker requests bearing header \`X-Internal-Secret\` must bypass rate limiting entirely.\n- **AC-4**: Sliding window counters stored in Redis with 60-second TTL; no persistent memory leakage.`,
+  requirements: `### Engineering Requirements: Webhook Rate Limiting\n\n#### 1. Problem Statement\nThe checkout webhook is vulnerable to burst traffic and unauthenticated request floods, creating downstream queue starvation and latency spikes in payment reconciliation.\n\n#### 2. User Stories & Acceptance Criteria\n- **REQ-1**: Limit webhook invocations to 60 requests per minute per merchant ID (\`merchant_<id>\`).\n- **REQ-2**: When limit is exceeded, immediately return HTTP 429 Too Many Requests with header \`Retry-After: 60\`.\n- **REQ-3**: Internal reconciliation worker requests bearing header \`X-Internal-Secret\` must bypass rate limiting entirely.\n- **REQ-4**: Sliding window counters stored in Redis with 60-second TTL; no persistent memory leakage.`,
   design: {
     files_to_modify: ['app/middleware/throttle.py', 'app/deps/redis.py', 'app/routes/webhook.py'],
     files_to_create: ['tests/test_throttle.py', 'tests/test_webhook.py'],
@@ -84,7 +84,9 @@ const DEMO = {
 
 async function walk(db, runId, moves) {
   for (const m of moves) {
-    const out = m.testRun
+    const out = m.policy
+      ? await recordPolicy(db, runId, m.policy, { agent: 'seed' })
+      : m.testRun
       ? await recordTestRun(db, runId, { fingerprint: demoFingerprint(runId), ...SANDBOX, ...m.testRun }, { agent: 'seed' })
       : m.robot
       ? await robotAction(db, runId, m.robot, { agent: 'seed', fingerprint: demoFingerprint(runId) })
@@ -119,12 +121,13 @@ export async function seed(db) {
           status: 'Passed', passed: 4, failed: 0, total: 4, iterations: 2, duration_ms: 267000, output: '4 passed',
           cases: demoCases([
             ['test_webhook_accepts_valid_payload', 'tests/test_webhook.py', 'passed', false],
-            ['test_allows_60_per_minute', 'tests/test_throttle.py', 'passed', true],
-            ['test_61st_request_gets_429', 'tests/test_throttle.py', 'passed', true],
-            ['test_internal_secret_bypasses_limit', 'tests/test_throttle.py', 'passed', true],
+            ['test_req_1_allows_60_per_minute', 'tests/test_throttle.py', 'passed', true],
+            ['test_req_2_61st_request_gets_429', 'tests/test_throttle.py', 'passed', true],
+            ['test_req_3_internal_secret_bypasses_limit', 'tests/test_throttle.py', 'passed', true],
           ]),
         },
       },
+      { policy: { found: false } },
       { robot: 'request_review' },
     ])
   } else {
@@ -174,6 +177,7 @@ export async function seed(db) {
           ]),
         },
       },
+      { policy: { found: false } },
       { robot: 'request_review' },
       { decide: 'reject', target: 'code', by: DEMO.reviewer, feedback: 'fake clock leaked into prod path' },
       { cancel: true, by: DEMO.reviewer, feedback: 'superseded by a scheduler rewrite' },

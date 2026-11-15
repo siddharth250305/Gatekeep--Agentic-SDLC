@@ -7,6 +7,9 @@ import { randomUUID } from 'node:crypto'
 import { appendEvent, getChain, verifyRun } from '../audit/service.js'
 import { withTransaction } from '../db.js'
 import { GATES, MOVES, ROBOT_ACTIONS, STEPS, planMove, robotTarget, statusFor } from './machine.js'
+import { designProblem, parseRequirements, traceability } from './trace.js'
+import { blockingIssues, excludedApprovers, governance } from '../policy/governance.js'
+import { policyRecord } from '../policy/policy.js'
 
 
 const fmtCost = (n) => (n == null ? null : `$${Number(n).toFixed(2)}`)
@@ -148,6 +151,16 @@ export async function getRun(db, runId) {
   // Every run starts with a "run.created" entry, so an empty diary means it was wiped.
   if (verify.valid && chain.length === 0) verify = { runId, valid: false, brokenAt: 1, reason: 'truncated' }
 
+  // Requirements -> design -> code -> tests (I2, I3), and at Gate 3 what the
+  // team rules still need (I4, I5). Derived on every read, never stored.
+  const trace = traceability({ requirements: art?.requirements, design: art?.design, files: art?.files, tests: latest })
+  const gov = run.step === 'g3'
+    ? governance({
+        policy: run.policy, trace, files: art?.files, tests: latest, approvals: await roundApprovals(db, runId),
+        createdBy: run.created_by_name, gateApprovers: gateApprovers(chain),
+      })
+    : null
+
   return {
     id: run.run_id,
     files: art?.files ?? null,
@@ -172,6 +185,9 @@ export async function getRun(db, runId) {
     // At Gate 3: which code was handed over, the test run it is judged on,
     // and whether approval is possible (B7). Same rule the approve uses.
     review: run.step === 'g3' ? reviewEvidence(run.review_fingerprint, latest) : null,
+    policy: run.policy ?? null,
+    trace,
+    governance: gov,
     started: run.started_at != null,
     updatedAt: run.updated_at,
     steps,
@@ -302,6 +318,13 @@ async function transition(db, runId, { pick, actor, name, feedback, details, art
     if (plan.error) return { ...plan, step: run.step }
     const guarded = guard ? await guard(tx, run, plan) : {}
     if (guarded.error) return { ...guarded, step: run.step }
+    // The move is allowed but not complete yet (Gate 3 needs more approvals,
+    // I4): the run stays where it is and the step records what happened.
+    if (guarded.hold) {
+      await tx.query('UPDATE runs SET updated_at = now() WHERE run_id = $1', [runId])
+      await appendEvent(tx, { runId, event: guarded.hold.event, actor: name, payload: { from: run.step, to: run.step, ...guarded.hold.payload } })
+      return { from: run.step, to: run.step, held: true }
+    }
 
     const { status, gate } = statusFor(plan.to)
     await tx.query(
@@ -309,6 +332,8 @@ async function transition(db, runId, { pick, actor, name, feedback, details, art
       [plan.to, status, gate, runId],
     )
     await showStep(tx, runId, run.step, plan.to)
+    // A review round ends when the run leaves Gate 3, approved or not.
+    if (run.step === 'g3') await tx.query('DELETE FROM gate_approvals WHERE run_id = $1', [runId])
     if (artifacts) await upsertArtifacts(tx, runId, artifacts)
     const payload = { from: run.step, to: plan.to, ...guarded.payload }
     if (typeof feedback === 'string' && feedback.trim()) payload.feedback = feedback
@@ -335,13 +360,43 @@ export async function decideGate(db, runId, { decision, target, feedback, expect
     if (target === 'design') return 'reject_to_design'
     return { error: 'target_required' }
   }
-  // B7: Gate 3 approves only the exact code that was handed over, and only
-  // when the latest test run passed on that same code.
+  // An invalid project policy stops every approval (fail closed, I5).
+  // Gate 3 (B7, I3, I4, I5): only the exact code that was handed over, tested
+  // and passing; no broken project rule; and this approval counts only once
+  // per reviewer, never from someone the team rules exclude. The run moves to
+  // Done when the approvals satisfy the rules; until then each is recorded.
   const guard = async (tx, run, plan) => {
+    if (plan.move.action !== 'approve') return {}
+    if (run.policy?.status === 'invalid') return { error: 'policy_invalid' }
     if (plan.to !== 'done') return {}
-    const evidence = reviewEvidence(run.review_fingerprint, await latestTestRun(tx, runId))
+    const latest = await latestTestRun(tx, runId)
+    const evidence = reviewEvidence(run.review_fingerprint, latest)
     if (!evidence.approvable) return { error: evidence.reason }
-    return { payload: { evidence: { fingerprint: evidence.fingerprint, testRun: evidence.testRunId } } }
+    const art = (await tx.query('SELECT files, requirements, design FROM run_artifacts WHERE run_id = $1', [runId])).rows[0]
+    const trace = traceability({ requirements: art?.requirements, design: art?.design, files: art?.files, tests: latest })
+    const blocking = blockingIssues({ policy: run.policy, trace, files: art?.files, tests: latest })
+    if (blocking.length) return { error: blocking[0].code, message: blocking[0].message }
+
+    const approvals = await roundApprovals(tx, runId)
+    if (approvals.some((a) => Number(a.userId) === Number(user?.id))) return { error: 'already_approved' }
+    const chain = await getChain(tx, runId)
+    const excluded = excludedApprovers({ policy: run.policy, createdBy: run.created_by_name, gateApprovers: gateApprovers(chain) })
+    const why = excluded.find((e) => e.username === user?.username)
+    if (why) return { error: why.reason === 'requester' ? 'requester' : 'same_approver', gate: why.reason }
+
+    await tx.query(
+      'INSERT INTO gate_approvals (run_id, fingerprint, user_id, username, role) VALUES ($1, $2, $3, $4, $5)',
+      [runId, evidence.fingerprint, user.id, user.username, user.role],
+    )
+    const now = [...approvals, { username: user.username, role: user.role }]
+    const gov = governance({ policy: run.policy, trace, files: art?.files, tests: latest, approvals: now })
+    const who = now.map((a) => ({ username: a.username, role: a.role }))
+    if (!gov.complete) {
+      const missing = gov.requirements.filter((r) => !r.satisfied)
+        .map((r) => ({ rule: r.label, approvals: r.approvals, have: r.have, reviewers: r.missingReviewers }))
+      return { hold: { event: 'g3.approval_recorded', payload: { fingerprint: evidence.fingerprint, approvals: who, missing } } }
+    }
+    return { payload: { evidence: { fingerprint: evidence.fingerprint, testRun: evidence.testRunId }, approvals: who } }
   }
   return transition(db, runId, {
     pick, actor: humanActor(user), name: user?.username, feedback, expectedStep, guard,
@@ -384,12 +439,40 @@ export async function robotAction(db, runId, action, { agent, details, artifacts
     if (!isPlainObject(artifacts)) return { error: 'bad_artifacts' }
     if (Object.keys(artifacts).some((k) => !ACTION_ARTIFACTS[action].includes(k))) return { error: 'bad_artifacts' }
   }
-  const guard = review
-    ? async (tx) => {
-        await tx.query('UPDATE runs SET review_fingerprint = $1 WHERE run_id = $2', [fingerprint, runId])
-        return { payload: { fingerprint, testRun: (await latestTestRun(tx, runId))?.id ?? null } }
+  if (artifacts?.requirements !== undefined && typeof artifacts.requirements !== 'string') return { error: 'bad_artifacts' }
+  // After the state machine allows the move: the hand-over must be structured
+  // (REQ IDs, I3; a file plan linked to them, I2) and keep the project rules
+  // (I5). An invalid policy stops every hand-over (fail closed).
+  const guard = async (tx, run) => {
+    if (run.policy?.status === 'invalid') return { error: 'policy_invalid' }
+    // What is checked is what the reviewer will see: the text handed over now,
+    // or else what was stored earlier for this step (PUT /artifacts).
+    if (action === 'submit_requirements' || action === 'submit_design') {
+      const art = (await tx.query('SELECT requirements, design FROM run_artifacts WHERE run_id = $1', [runId])).rows[0]
+      const requirements = artifacts?.requirements ?? art?.requirements
+      if (action === 'submit_requirements' && requirements != null) {
+        const parsed = parseRequirements(requirements)
+        if (parsed.error) return { error: parsed.error, ids: parsed.duplicates }
       }
-    : undefined
+      const design = artifacts?.design ?? art?.design
+      if (action === 'submit_design' && design != null) {
+        const problem = designProblem(design, art?.requirements)
+        if (problem) return problem
+      }
+    }
+    if (!review) return {}
+    // B7, I5: the code is handed over only once the project policy was read,
+    // and only while it keeps the project's rules.
+    if (!run.policy) return { error: 'policy_unknown' }
+    const latest = await latestTestRun(tx, runId)
+    const art = (await tx.query('SELECT files, requirements, design FROM run_artifacts WHERE run_id = $1', [runId])).rows[0]
+    const files = artifacts?.files ?? art?.files
+    const trace = traceability({ requirements: art?.requirements, design: art?.design, files, tests: latest })
+    const blocking = blockingIssues({ policy: run.policy, trace, files, tests: latest })
+    if (blocking.length) return { error: blocking[0].code, message: blocking[0].message }
+    await tx.query('UPDATE runs SET review_fingerprint = $1 WHERE run_id = $2', [fingerprint, runId])
+    return { payload: { fingerprint, testRun: latest?.id ?? null } }
+  }
   const out = await transition(db, runId, {
     pick: () => action, actor: { kind: 'agent' }, name: `agent:${agent}`, details, artifacts, sameAs: robotTarget(action), guard,
   })
@@ -409,6 +492,49 @@ export async function writeStepArtifacts(db, runId, artifacts) {
     await upsertArtifacts(tx, runId, artifacts)
     return { ok: true }
   })
+}
+
+// The project policy (I5), recorded once per run by the agent service, which
+// reads gatekeep.yaml from the run's base commit. The same file again is a
+// no-op; a different one is refused, so the rules cannot change mid-run.
+// Returns { policy, unchanged? } or { error: 'bad_policy' | 'not_found' |
+// 'finished' | 'policy_locked' }.
+export async function recordPolicy(db, runId, body, { agent } = {}) {
+  const record = policyRecord(body)
+  if (record.error) return record
+  return withTransaction(db, async (tx) => {
+    const run = (await tx.query('SELECT step, policy FROM runs WHERE run_id = $1 FOR UPDATE', [runId])).rows[0]
+    if (!run) return { error: 'not_found' }
+    if (run.step === 'done' || run.step === 'cancelled') return { error: 'finished', step: run.step }
+    if (run.policy) {
+      const same = run.policy.status === record.status && (run.policy.sha256 ?? null) === (record.sha256 ?? null)
+      return same ? { policy: run.policy, unchanged: true } : { error: 'policy_locked', step: run.step }
+    }
+    await tx.query('UPDATE runs SET policy = $1, updated_at = now() WHERE run_id = $2', [JSON.stringify(record), runId])
+    await appendEvent(tx, {
+      runId, event: 'policy.recorded', actor: `agent:${agent}`,
+      payload: { status: record.status, sha256: record.sha256 ?? null, errors: record.errors ?? [] },
+    })
+    return { policy: record }
+  })
+}
+
+// The Gate 3 approvals of the current review round (I4), oldest first.
+async function roundApprovals(db, runId) {
+  const { rows } = await db.query(
+    'SELECT user_id, username, role, created_at FROM gate_approvals WHERE run_id = $1 ORDER BY created_at ASC, username ASC', [runId],
+  )
+  return rows.map((r) => ({ userId: Number(r.user_id), username: r.username, role: r.role, at: r.created_at }))
+}
+
+// Who approved Gate 1 and Gate 2 last (the approvals the run stands on).
+export function gateApprovers(chain) {
+  const out = {}
+  for (const e of chain) {
+    if (e.event === 'g1.approved') out.g1 = e.actor
+    if (e.event === 'g2.approved') out.g2 = e.actor
+  }
+  return out
 }
 
 // Start is safe to repeat: the first call claims the run (only a run still at

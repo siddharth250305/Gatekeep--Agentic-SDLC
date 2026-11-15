@@ -180,3 +180,21 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   revoked_at TIMESTAMPTZ
 );
+
+-- The project policy (gatekeep.yaml, I5), recorded once per run by the agent
+-- service from the run's base commit: { status: none | loaded | invalid,
+-- sha256, rules | errors }. NULL: not read yet (the code cannot be handed over).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS policy JSONB;
+
+-- Gate 3 approvals of the current review round (I4). A run leaves Gate 3 only
+-- when they satisfy the team rules; leaving Gate 3 (either way) clears them.
+-- The audit chain keeps every approval for good.
+CREATE TABLE IF NOT EXISTS gate_approvals (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  fingerprint TEXT NOT NULL,
+  user_id     BIGINT NOT NULL,
+  username    TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, user_id)
+);

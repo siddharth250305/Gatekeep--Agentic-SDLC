@@ -31,6 +31,28 @@ const REVIEW_BLOCKS = {
   tests_not_passed: 'The last test run on this code did not pass',
 }
 
+// Why the team rules stop this reviewer at Gate 3 (I3, I4, I5), from the
+// server's run.governance: a rule the change breaks, an approval this person
+// already gave, or a separation-of-duties rule that excludes them.
+function governanceBlockReason(run, user) {
+  const gov = run?.step === 'g3' ? run.governance : null
+  if (!gov) return null
+  if (gov.blocking?.length) return gov.blocking[0].message
+  if (gov.approvals?.some((a) => a.username === user?.username)) return 'You already approved this code; another reviewer must add the next approval'
+  const excluded = gov.excluded?.find((e) => e.username === user?.username && e.reason !== 'requester')
+  if (excluded) return `You ${excluded.reason} of this run, so someone else must approve the code`
+  return null
+}
+
+// "Approvals: 1 of 2" when Gate 3 needs more than one approval or has some.
+export function approvalProgress(run) {
+  const gov = run?.step === 'g3' ? run.governance : null
+  if (!gov?.requirements?.length) return null
+  const need = Math.max(...gov.requirements.map((r) => r.approvals))
+  const have = gov.approvals?.length ?? 0
+  return need > 1 || have > 0 ? `Approvals: ${have} of ${need}` : null
+}
+
 export function approvalBlockReason(run) {
   if (run?.step !== 'g3') return null
   if (run.review?.approvable === true) return null
@@ -51,7 +73,7 @@ export function gateView(run, user) {
     const requesterBlock = step === 'g3' && run.createdBy && user?.username === run.createdBy
       ? 'You asked for this work, so someone else must give the final approval'
       : null
-    const approveBlock = roleBlock || requesterBlock || approvalBlockReason(run)
+    const approveBlock = roleBlock || requesterBlock || approvalBlockReason(run) || governanceBlockReason(run, user)
     return {
       kind: 'gate',
       step,
@@ -63,6 +85,7 @@ export function gateView(run, user) {
       approveBlock,
       canReject: !roleBlock,
       rejectBlock: roleBlock,
+      progress: approvalProgress(run),
     }
   }
   if (step === 'done') return { kind: 'done', title: 'Run complete', waitingFor: 'Nobody, all three gates are approved' }

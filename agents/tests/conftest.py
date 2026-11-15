@@ -28,6 +28,28 @@ DECISIONS = {
 }
 KEYS = ["req", "g1", "design", "g2", "code", "g3", "done"]
 GATE_ROLE = {"g1": "Planner", "g2": "Engineer", "g3": "Engineer"}
+# The gatekeep.yaml settings the backend accepts (backend/src/policy/policy.js).
+POLICY_KEYS = {"version", "forbidden_paths", "protected_paths", "tools", "design", "scope", "tests", "team"}
+
+
+def recorded_policy(body: dict) -> dict:
+    """What the backend stores for PUT /runs/:id/policy (I5), reduced to the
+    rules the agent side reads."""
+    if not body.get("found"):
+        return {"status": "none"}
+    if "error" in body:
+        return {"status": "invalid", "sha256": body.get("sha256"), "errors": [body["error"]]}
+    content = body.get("content")
+    unknown = sorted(set(content) - POLICY_KEYS) if isinstance(content, dict) else ["(not a mapping)"]
+    if unknown:
+        return {"status": "invalid", "sha256": body.get("sha256"), "errors": [f"unknown setting '{unknown[0]}'"]}
+    rules = {
+        "forbidden_paths": content.get("forbidden_paths") or [],
+        "protected_paths": content.get("protected_paths") or [],
+        "tools": {"deny": (content.get("tools") or {}).get("deny") or []},
+        "design": {"enforce": (content.get("design") or {}).get("enforce") or "warn"},
+    }
+    return {"status": "loaded", "sha256": body.get("sha256"), "rules": rules}
 
 
 class FakeNodeBackend:
@@ -45,7 +67,7 @@ class FakeNodeBackend:
                 repo: str = "") -> dict:
         run = {"id": run_id, "brief": brief, "repo": repo, "branch": "", "commit": "", "step": step,
                "started": started, "requirements": None, "design": None, "files": None, "diff": None,
-               "summary": None, "tests": None, "auditChain": [{"event": "run.created", "payload": {}}]}
+               "summary": None, "tests": None, "policy": None, "trace": None, "auditChain": [{"event": "run.created", "payload": {}}]}
         self.runs[run_id] = run
         return run
 
@@ -122,6 +144,15 @@ class FakeNodeBackend:
             self.test_runs.append(tr)
             run["tests"] = tr
             return 201, tr
+        if method == "PUT" and rest == "/policy":
+            stored = recorded_policy(body)
+            if run["policy"] is not None:
+                same = run["policy"].get("sha256") == stored.get("sha256")
+                return (200, self.view(run)) if same else (409, {"error": "locked", "reason": "policy_locked"})
+            run["policy"] = stored
+            run["auditChain"].append({"event": "policy.recorded", "actor": "agent:test",
+                                      "payload": {"status": stored["status"]}})
+            return 200, self.view(run)
         if method in ("PUT", "POST") and rest in ("/context", "/event", "/artifacts"):
             return 200, {"ok": True}
         m2 = re.match(r"^/actions/([a-z_]+)$", rest)
@@ -139,6 +170,8 @@ class FakeNodeBackend:
             return 409, {"error": f"not allowed at {run['step']}", "reason": "not_allowed", "step": run["step"]}
         if action == "request_review" and not body.get("fingerprint"):
             return 400, {"error": "fingerprint required", "reason": "fingerprint_required"}
+        if action == "request_review" and run["policy"] is None:
+            return 409, {"error": "the project's policy was not read", "reason": "policy_unknown", "step": run["step"]}
         for k in kinds:
             if k in (body.get("artifacts") or {}):
                 run[k] = body["artifacts"][k]

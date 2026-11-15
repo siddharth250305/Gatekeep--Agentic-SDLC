@@ -186,7 +186,7 @@ export default function App() {
           : `${run.id}: Decision recorded, but the agent service could not be reached (${pipeline.reason}). The run continues when it is back.`, 8000)
       } else {
         flash(decision === 'approve'
-          ? `${run.id} approved. Gate advanced.`
+          ? (answer?.step === 'g3' && run.step === 'g3' ? `${run.id}: your approval is recorded. Gate 3 needs more approvals.` : `${run.id} approved. Gate advanced.`)
           : `${run.id}: rework requested. Feedback sent to agent.`)
       }
       await refresh()
@@ -316,6 +316,7 @@ export default function App() {
         onApprove={() => decide('approve')}
         onRequestChanges={() => setReworkOpen(true)}
         onOpenReview={openReview}
+        flash={flash}
       />
 
       <main className="flex flex-1 min-w-0 min-h-0 overflow-hidden bg-canvas">

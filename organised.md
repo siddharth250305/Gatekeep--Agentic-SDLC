@@ -557,11 +557,11 @@ Rough total for one person: **about 8 to 10 weeks.**
 - [x] G8 Session expiry
 
 **Milestone 6: Features that beat other tools**
-- [ ] I1 Claude Code and Cursor settings
-- [ ] I2 Design vs code check
-- [ ] I3 Requirement tracking
-- [ ] F5 Gate 3 page (part 2)
-- [ ] I4 Separation of duties
-- [ ] I5 `gatekeep.yaml`
-- [ ] I6 Pull Request export
-- [ ] H2 Final README update
+- [x] I1 Claude Code and Cursor settings (`integrations/`: Claude Code deny rules + allowlist PreToolUse hook; Cursor hooks for shell, file reads and MCP, plus rules; Cursor's built-in editor can only be discouraged)
+- [x] I2 Design vs code check (structured `## Files` plan required at Gate 2; undeclared and untouched files at Gate 3; `design.enforce: block` refuses writes outside the plan)
+- [x] I3 Requirement tracking (`REQ-n` IDs required; design, changed files and `test_req_n_*` tests linked; coverage table; budgets and coverage rules in `gatekeep.yaml`)
+- [x] F5 Gate 3 page (part 2): requirement-to-test checklist with uncovered/failing in red, planned vs changed table with red warnings, triggered `gatekeep.yaml` rules and approvals
+- [x] I4 Separation of duties (requester never counts; several approvals, named reviewers and roles per protected path; optional distinct Gate 1/2 and Gate 3 approvers)
+- [x] I5 `gatekeep.yaml` (read from the base commit, recorded once, validated in one place, enforced in `GateKeepTools` and at Gate 3; invalid or unreadable = fail closed)
+- [x] I6 Pull Request export (Ed25519-signed evidence bundle, offline `verify.js` + GitHub required-check template, PR with full approval history and `.gatekeep/evidence/<run>.json`)
+- [x] H2 Final README update (README, MCP guide, agents README, `integrations/README.md`, `docs/gatekeep.example.yaml`)

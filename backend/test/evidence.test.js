@@ -171,6 +171,7 @@ test('HTTP: test runs are agent-only, result fields cannot be faked through PUT 
     assert.equal(faked.status, 403)
     assert.equal((await call('PUT', `/runs/${id}/tests`, agent, { image: 'python:3.12-slim' })).status, 200)
 
+    assert.equal((await call('PUT', `/runs/${id}/policy`, agent, { found: false })).status, 200)
     assert.equal((await call('POST', `/runs/${id}/actions/request_review`, agent, {})).status, 400)
     assert.equal((await call('POST', `/runs/${id}/actions/request_review`, agent, { fingerprint: OTHER_FP })).status, 200)
     const refused = await call('POST', `/runs/${id}/decide`, engineer, { decision: 'approve', gate: 'g3' })

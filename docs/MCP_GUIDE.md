@@ -89,10 +89,14 @@ Network transports (SSE, streamable HTTP) require a bearer token. Start the serv
 Without `GATEKEEP_MCP_TOKEN` the server refuses to start in network mode.
 
 ### C. Claude Code (CLI)
-When starting Claude Code:
+Use the ready-made project settings in [`integrations/claude-code/`](../integrations/README.md) instead of only adding the server:
+
 ```bash
-claude mcp add gatekeep -- python3 -m app.mcp.server
+cp -R integrations/claude-code/.claude integrations/claude-code/.mcp.json /path/to/project/
+export GATEKEEP_HOME=/path/to/gatekeeper GATEKEEP_API_TOKEN=gka_...
 ```
+
+They add the GateKeep MCP server (`.mcp.json`), deny Claude Code's own Edit, Write, Bash, Read, Grep, WebFetch, Task and similar tools (`.claude/settings.json`), and run a PreToolUse hook on every call that lets only `mcp__gatekeep__gatekeep_*` through. Without them the agent can still edit files and run commands outside GateKeep. Cursor has the same in [`integrations/cursor/`](../integrations/README.md) (shell commands and direct file reads denied; Cursor's built-in editor can only be discouraged by its rules).
 
 ---
 
@@ -121,6 +125,17 @@ claude mcp add gatekeep -- python3 -m app.mcp.server
 
 ---
 
+## 3b. What the agent must hand over (Milestone 6)
+
+The backend checks each hand-over, so these are rules, not suggestions:
+
+- **Requirements**: one requirement per line, starting with its ID: `REQ-1: ...`, each ID once. Without IDs `gatekeep_submit_requirements` is refused (an answer that is only `NO_ACTIONABLE_FEATURE: ...` is the exception, so the reviewer sees it).
+- **Design**: a `## Files` heading listing every file the code step will change, one per list item, with the requirements it serves: ``- `payments/refund.py` (create) [REQ-1, REQ-3]``. A pattern is allowed when it starts with a plain folder and has at most one `**` (`tests/**`). Optional `## Interfaces` in the same form. A design without a plan, with a path outside the workspace, or pointing at an unknown requirement is refused.
+- **Tests**: name each test after the requirement it checks: `test_req_1_refund_capped_at_charge`. Gate 3 shows every requirement with its tests; one without a passing test is red.
+- **Code**: change only the planned files. Others are flagged red at Gate 3, and refused outright when the project's `gatekeep.yaml` sets `design: { enforce: block }`.
+
+`gatekeep_get_agent_context` lists these rules and the project's own `gatekeep.yaml` rules in `restrictions`.
+
 ## 4. Policy Engine Guarantees
 
 Even if the external model attempts to hallucinate or bypass steps:
@@ -132,3 +147,8 @@ Even if the external model attempts to hallucinate or bypass steps:
 3. **Path Traversal Guard**: Attempting relative escapes (`../../etc/passwd`) returns:
    `{"error": "Path traversal (..) is not allowed"}`
 4. **Human In The Loop**: No phase transition past a gate can occur without a human reviewer approving on the GateKeep Dashboard.
+5. **Project policy (`gatekeep.yaml`)**: read from the run's base commit and recorded once before the first workspace tool. A forbidden path (in any letter case, also through a shortcut) returns
+   `{"error": "'infra/deploy.sh' is forbidden by gatekeep.yaml (forbidden_paths: infra/**)"}`; a denied tool returns `"Tool 'search_code' is denied by gatekeep.yaml for this project"`. An invalid or unreadable policy stops every tool except the status tools.
+6. **Governed files**: `gatekeep.yaml`, `.gatekeep/` and folders the review cannot see (`__pycache__/`, `.pytest_cache/`) can never be written by the agent.
+7. **Hand-over rules**: `gatekeep_request_approval` is refused while the change breaks a project rule (file or line budget, forbidden path, files outside an enforced design, missing new tests or requirement coverage); the refusal says which.
+8. **Team approvals**: Gate 3 may need several approvals and named reviewers; the requester, and with `distinct_gate_approvers` the Gate 1 and Gate 2 approvers, never count. Agents can never approve.

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [{ "command": "node .cursor/hooks/gatekeep-guard.mjs" }],
+    "beforeReadFile": [{ "command": "node .cursor/hooks/gatekeep-guard.mjs" }],
+    "beforeMCPExecution": [{ "command": "node .cursor/hooks/gatekeep-guard.mjs" }]
+  }
+}

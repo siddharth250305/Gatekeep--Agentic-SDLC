@@ -26,6 +26,7 @@ from ..repository.tools import WorkspaceTools
 from ..backend_auth import auth_headers
 from ..diffing import diff_artifacts, workspace_diff
 from ..fingerprint import tree_fingerprint
+from ..project_policy import load_policy_file
 from ..sandbox import SandboxRunner, sandbox_profile
 from ..workspace import WORKSPACES, validate_run_id
 from .policy import PolicyEngine
@@ -197,7 +198,14 @@ class GateKeepTools:
             return {"error": f"{', '.join(bad)} must be text", "tool": tool}
         run = self._fetch_run(session)
         path = args.get("path") if tool in self.policy.FILE_TOOLS else None
-        denial = self.policy.evaluate(run, tool, path=path, write=self.policy.FILE_TOOLS.get(tool, False))
+        write = self.policy.FILE_TOOLS.get(tool, False)
+        denial = self.policy.evaluate(run, tool, path=path, write=write)
+        if denial is None and tool in self.policy.POLICY_TOOLS:
+            run, denial = self._ensure_policy(session, run, tool)
+        if denial is None:
+            denial = self.policy.project_denial(run, tool, path=path, write=write)
+        if denial is None and write and path is not None:
+            denial = self._real_path_denial(session, run, tool, path)
         if denial is None:
             impl = getattr(self, f"_tool_{tool}", None)
             if impl is None:
@@ -211,6 +219,52 @@ class GateKeepTools:
         if run.get("id"):
             self._audit(run["id"], "mcp.policy.denied", denial)
         return denial
+
+    def _real_path_denial(self, session: McpSession, run: dict[str, Any], tool: str,
+                          path: str) -> dict[str, Any] | None:
+        """The same file rules for the real file behind *path* after every
+        shortcut is followed, so a shortcut cannot lead a write into a
+        protected folder (ECC review). A path that leaves the workspace is
+        refused by the tool itself."""
+        root = Path(self._workspace_path(session)).resolve()
+        try:
+            real = WorkspaceTools(str(root))._safe(path).relative_to(root).as_posix()
+        except ValueError:
+            return None
+        if real == Path(path).as_posix():
+            return None
+        result = self.policy.check_file_access(real, write=True)
+        if not result.allowed:
+            return {"error": f"{result.reason} (via the shortcut '{path}')", "path": path, "tool": tool}
+        return self.policy.project_denial(run, tool, path=real, write=True)
+
+    def _ensure_policy(self, session: McpSession, run: dict[str, Any],
+                       tool: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Record the project's gatekeep.yaml with the backend before the
+        first workspace tool runs (I5). Returns (run, None) to go ahead, or
+        (run, denial) when the policy could not be recorded (fail closed).
+        Without a workspace there is nothing to read yet (and nothing to act on)."""
+        if run.get("policy") is not None:
+            return run, None
+        workspace = self._workspace_path(session)
+        if not os.path.isdir(workspace):
+            return run, None
+        try:
+            body = load_policy_file(workspace)
+            updated = self._backend_put(f"runs/{session.run_id}/policy", body)
+            if isinstance(updated, dict) and updated.get("policy") is not None:
+                return updated, None
+            return self._fetch_run(session), None
+        except (*BACKEND_ERRORS, OSError, subprocess.SubprocessError) as exc:
+            log.warning("policy warning: %s", exc)
+        try:  # another call may have recorded it meanwhile
+            again = self._fetch_run(session)
+        except BACKEND_ERRORS:
+            again = run
+        if again.get("policy") is not None:
+            return again, None
+        return run, {"error": "The project policy (gatekeep.yaml) could not be recorded, so nothing was done. "
+                              "Try again when the GateKeep backend is reachable.", "tool": tool}
 
     # ── run / context ────────────────────────────────────────────────────
 
@@ -277,6 +331,11 @@ class GateKeepTools:
                 "Gate 3 can only approve the exact code of a passing test run",
                 "After request_approval the workspace is frozen until a reviewer decides",
                 "Human approval is required at every gate",
+                "Requirements: one per line with an ID, 'REQ-1: ...'",
+                "Design: list every file under a '## Files' heading: - `path` (create|modify) [REQ-1]",
+                "Tests: name each test after its requirement, test_req_1_...",
+                "gatekeep.yaml and .gatekeep/ cannot be written",
+                *self.policy.project_restrictions(run),
             ],
         }
 

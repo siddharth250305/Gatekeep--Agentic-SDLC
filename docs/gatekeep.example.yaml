@@ -1,0 +1,52 @@
+# gatekeep.yaml: the project's own rules for AI-written changes (I5).
+# Put it in the repository root. GateKeep reads it from the commit the run
+# starts from (never from the agent's working copy), records it once per run,
+# and shows it at every gate. The agent can never write this file or .gatekeep/.
+# Any setting GateKeep does not understand makes the whole file invalid, and an
+# invalid file stops the run (only Cancel works) until it is fixed.
+
+version: 1
+
+# The agent may never write these (GateKeep refuses the write, and refuses the
+# hand-over if such a file changed anyway). Patterns: * and ? inside one
+# folder, ** for any number of folders, "dir/" for everything under dir, and a
+# pattern without "/" matches that name in any folder.
+forbidden_paths:
+  - infra/**
+  - .github/workflows/**
+  - migrations/*.sql
+
+# These may change, but Gate 3 then needs more: `approvals` distinct Engineer or
+# Admin approvals (the requester never counts), every user in `reviewers`, and
+# only roles in `roles` count (default: Engineer and Admin).
+protected_paths:
+  - path: payments/**
+    approvals: 2
+    reviewers: [alice]
+  - path: auth/
+    roles: [Admin]
+
+# GateKeep workspace tools this project switches off for the agent.
+# Allowed: list_files, read_file, search_code, get_repository_context,
+# get_diff, write_file, apply_patch (a policy can never remove a gate or the tests).
+tools:
+  deny: []
+
+# warn (default): files changed outside the approved design get a red warning
+# at Gate 3. block: the agent can only write files listed in the approved
+# design's "## Files" plan, and such a change cannot be handed over.
+design:
+  enforce: warn
+
+# Change-size budgets, checked at the hand-over and at Gate 3.
+scope:
+  max_files_changed: 20
+  max_lines_changed: 800
+
+tests:
+  require_new_tests: true              # at least one new passing test
+  require_requirement_coverage: false  # every REQ-n needs a passing test_req_<n>_... test
+
+team:
+  min_approvals: 1                 # Gate 3 approvals for any change
+  distinct_gate_approvers: true    # whoever approved Gate 1 or 2 cannot approve the code

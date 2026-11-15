@@ -1,0 +1,16 @@
+---
+description: GateKeep governs every change in this project
+alwaysApply: true
+---
+
+This project is governed by GateKeep. Humans approve the requirements, the design and the code at three gates.
+
+- Work on a GateKeep run only through the GateKeep MCP tools. Start with `gatekeep_get_agent_context`.
+- Read code with `gatekeep_read_file`, `gatekeep_list_files` and `gatekeep_search_code`.
+- Change code only with `gatekeep_apply_patch` or `gatekeep_write_file`. Never use the built-in editor, the terminal or any other tool to change files.
+- Run tests only with `gatekeep_run_tests`. Hand the work over with `gatekeep_request_approval`.
+- Requirements: give each one an ID on its own line, `REQ-1: ...`.
+- Design: list every file you will change under a `## Files` heading, one per line, with the requirements it serves: ``- `app/x.py` (create) [REQ-1]``. Files outside that list are flagged at Gate 3, or refused when the project's `gatekeep.yaml` says `design: { enforce: block }`.
+- Tests: name each test after the requirement it checks, `test_req_1_...`.
+- Never edit `gatekeep.yaml`, `.gatekeep/`, `.env` or other secret files. GateKeep refuses those writes.
+- You cannot approve, skip or reopen a gate. Do not try to call the GateKeep backend directly.

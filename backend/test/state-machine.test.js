@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ACTIONS, STEPS, planMove } from '../src/runs/machine.js'
-import { cancelRun, createRun, decideGate, getRun, robotAction } from '../src/runs/service.js'
+import { cancelRun, createRun, decideGate, getRun, recordPolicy, robotAction } from '../src/runs/service.js'
 import { freshDb } from './helpers/db.js'
 import { FP, handOver } from './helpers/evidence.js'
 
@@ -327,12 +327,13 @@ test('cancel works from every active step and is final', async () => {
     design: [['robot', 'submit_requirements'], ['human', PLANNER]],
     g2: [['robot', 'submit_requirements'], ['human', PLANNER], ['robot', 'submit_design']],
     code: [['robot', 'submit_requirements'], ['human', PLANNER], ['robot', 'submit_design'], ['human', ENGINEER]],
-    g3: [['robot', 'submit_requirements'], ['human', PLANNER], ['robot', 'submit_design'], ['human', ENGINEER], ['robot', 'request_review']],
+    g3: [['robot', 'submit_requirements'], ['human', PLANNER], ['robot', 'submit_design'], ['human', ENGINEER], ['policy'], ['robot', 'request_review']],
   }
   for (const [step, path] of Object.entries(reach)) {
     const db = await freshDb()
     const id = await newRun(db, `RUN-C-${step}`)
     for (const [kind, x] of path) {
+      if (kind === 'policy') { assert.ok((await recordPolicy(db, id, { found: false }, { agent })).policy); continue }
       const out = kind === 'robot' ? await robotAction(db, id, x, { agent, fingerprint: FP }) : await decideGate(db, id, { decision: 'approve', user: x })
       assert.ok(out.run, JSON.stringify(out))
     }
@@ -446,6 +447,8 @@ test('every step change writes exactly one audit entry with the real actor and s
     ['code.review_requested', 'agent:mcp-agent', 'code', 'g3'],
     ['g3.approved', 'eli-engineer', 'g3', 'done'],
   ]
+  // Reading the project policy is not a step change: done up front (I5).
+  await recordPolicy(db, id, { found: false }, { agent: 'mcp-agent' })
   const startLen = (await getRun(db, id)).auditChain.length
   for (let i = 0; i < moves.length; i++) {
     const before = (await getRun(db, id)).auditChain.length

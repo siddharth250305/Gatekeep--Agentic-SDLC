@@ -12,7 +12,8 @@
     "test:pg": "TEST_DATABASE_URL=${TEST_DATABASE_URL:-postgres://gatekeep:gatekeep@localhost:5432/gatekeep_test} node --test test/*.test.js",
     "user:create": "node src/cli/user-create.js",
     "token:create": "node src/cli/token.js create",
-    "token:revoke": "node src/cli/token.js revoke"
+    "token:revoke": "node src/cli/token.js revoke",
+    "evidence:verify": "node src/evidence/verify.js"
   },
   "dependencies": {
     "express": "^4.21.2",

@@ -1,5 +1,6 @@
 import { Check, RotateCcw, ArrowRight } from 'lucide-react'
 import { gateView } from '../lib/gate'
+import RunExport from './RunExport'
 
 const DOT = {
   gate: 'bg-[#ff9500] animate-pulse',
@@ -14,7 +15,7 @@ const DOT = {
 // you are, and the two decisions. When this user may not approve, the button
 // is disabled and the banner says why, before anyone clicks. busy: a decision
 // is being sent, so both buttons wait for it.
-export default function GateBanner({ run, user, busy = false, onApprove, onRequestChanges, onOpenReview }) {
+export default function GateBanner({ run, user, busy = false, onApprove, onRequestChanges, onOpenReview, flash }) {
   if (!run) return null
   const view = gateView(run, user)
   const isGate = view.kind === 'gate'
@@ -41,7 +42,10 @@ export default function GateBanner({ run, user, busy = false, onApprove, onReque
             You are: <span className="font-semibold text-ink dark:text-[#f5f5f7]">{user?.role || 'not signed in'}</span>
             {user?.name && <span className="hidden sm:inline"> ({user.name})</span>}
           </span>
+          {view.progress && <span className="font-semibold text-[#b25000] dark:text-[#ff9f0a]">{view.progress}</span>}
         </div>
+
+        {view.kind === 'done' && <RunExport run={run} flash={flash} />}
 
         {isGate && (
           <div className="flex flex-wrap items-center gap-2">
