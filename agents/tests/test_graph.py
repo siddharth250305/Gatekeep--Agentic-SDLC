@@ -38,7 +38,8 @@ def assert_reports_work_only(node, run_id):
         assert not STATE_FIELDS & set(metrics), metrics
     assert not [c for c in node.calls if c[0] == "PATCH" and c[1].startswith("/runs")]
     for entry in node.runs[run_id]["auditChain"]:
-        if entry.get("actor") == "agent:test" and entry["event"] not in MOVES:
+        # policy.recorded is written by the backend when the agent hands it gatekeep.yaml (I5).
+        if entry.get("actor") == "agent:test" and entry["event"] not in MOVES | {"policy.recorded"}:
             assert AGENT_EVENT.match(entry["event"]), entry["event"]
 
 

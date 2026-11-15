@@ -26,14 +26,20 @@ log = logging.getLogger("gatekeep.llm")
 # Canned agent outputs used by the fake model (kind -> artifact).
 CANNED = {
     "requirements": (
-        "Throttle the checkout webhook to 60 requests/min per merchant key. "
-        "Return HTTP 429 with a Retry-After header when exceeded. Exempt "
-        "internal reconciliation traffic by service token."
+        "## Injection Check\nStatus: NONE\n\n"
+        "## Requirements\n"
+        "REQ-1: Allow up to 60 webhook calls per minute per merchant key.\n"
+        "REQ-2: Refuse call 61 within the minute (HTTP 429 with a Retry-After header).\n"
+        "REQ-3: Exempt internal reconciliation traffic (service token).\n"
     ),
     "design": (
-        "Token-bucket counter in Redis keyed by merchant. Enforced in a FastAPI "
-        "dependency so every route inherits it. Limits and window come from env "
-        "with safe defaults. Reconciliation token bypasses the bucket."
+        "## Approach\nA counter per merchant key, checked in one helper so every route inherits it. "
+        "Limits come from env with safe defaults. The reconciliation token bypasses the counter.\n\n"
+        "## Files\n"
+        "- `throttle.py` (create): is_allowed(count, limit) [REQ-1, REQ-2, REQ-3]\n"
+        "- `test_throttle.py` (create): tests named after the requirements [REQ-1, REQ-2]\n\n"
+        "## Interfaces\n"
+        "- `is_allowed(count, limit=60) -> bool`: REQ-1, REQ-2\n"
     ),
     "coding": (
         "Implemented app/middleware/throttle.py (Redis token bucket) and wired "
@@ -52,9 +58,9 @@ CODE_FILES = {
     ),
     "test_throttle.py": (
         "from throttle import is_allowed\n\n"
-        "def test_under_limit():\n    assert is_allowed(1)\n\n"
-        "def test_at_limit():\n    assert is_allowed(60)\n\n"
-        "def test_over_limit():\n    assert not is_allowed(61)\n"
+        "def test_req_1_under_limit():\n    assert is_allowed(1)\n\n"
+        "def test_req_1_at_limit():\n    assert is_allowed(60)\n\n"
+        "def test_req_2_over_limit():\n    assert not is_allowed(61)\n"
     ),
 }
 
