@@ -98,6 +98,10 @@ export const api = {
       method: 'DELETE',
     }).then(json),
 
+  // A finished run's signed evidence bundle, and its Pull Request (I6).
+  evidence: (id) => call(`/runs/${id}/evidence`).then(json),
+  createPullRequest: (id) => call(`/runs/${id}/pull-request`, { method: 'POST' }).then(json),
+
   // MCP External Agent Sessions
   listMcpSessions: () => call(`/mcp/sessions`).then(json),
   getMcpSessionsForRun: (runId) => call(`/mcp/sessions/run/${runId}`).then(json),

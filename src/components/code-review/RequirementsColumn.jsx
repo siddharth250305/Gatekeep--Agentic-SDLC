@@ -4,6 +4,7 @@ import { RequirementsRenderer } from '../specs/MarkdownBlocks'
 import { GateBadge } from '../specs/GateBadge'
 import { parseMarkdownBlocks, requirementsText } from '../../lib/markdown'
 import { testOutcome } from '../views/TestResultsView'
+import TraceChecklist from './TraceChecklist'
 
 const OUTCOME_TONE = {
   pass: 'text-[#17692e] dark:text-[#34c759]',
@@ -11,8 +12,9 @@ const OUTCOME_TONE = {
   none: 'text-muted dark:text-[#a1a1aa]',
 }
 
-// Gate 3, left column (F5 part 1): what was approved at Gate 1, and what the
-// tests showed. The reviewer checks the code in the middle against both.
+// Gate 3, left column (F5): what was approved at Gate 1, each requirement
+// linked to the tests that cover it (part 2, I3), and what the tests showed.
+// The reviewer checks the code in the middle against both.
 export default function RequirementsColumn({ run }) {
   const text = requirementsText(run)
   const blocks = useMemo(() => parseMarkdownBlocks(text || ''), [text])
@@ -31,6 +33,8 @@ export default function RequirementsColumn({ run }) {
         </h2>
         <GateBadge run={run} stepKey="g1" role="Planner" />
       </div>
+
+      <TraceChecklist trace={run?.trace} />
 
       <div className="px-4 py-3">
         {blocks.length
