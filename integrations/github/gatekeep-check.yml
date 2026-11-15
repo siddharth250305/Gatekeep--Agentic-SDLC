@@ -1,0 +1,55 @@
+# GateKeep as a required check (I6). Copy to .github/workflows/gatekeep-check.yml
+# in the governed repository, together with:
+#   .github/gatekeep/verify.js        a copy of backend/src/evidence/verify.js (no dependencies)
+#   .github/gatekeep/gatekeep.pub.pem  your GateKeep server's key: GET /evidence/public-key
+# Then mark the "GateKeep" check as required in the branch protection rules.
+#
+# pull_request_target runs this file and the verifier from the BASE branch, so
+# a pull request cannot change the check that judges it. The PR's files are
+# checked out as data only: nothing from the PR is executed.
+#
+# A PR passes only if it was opened by GateKeep (branch gatekeep/<run>), its
+# signed evidence verifies with the pinned key, and the PR's code is exactly
+# the code Gate 3 approved (--tree).
+
+name: GateKeep
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  gatekeep:
+    name: GateKeep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the trusted verifier (base branch)
+        uses: actions/checkout@v4
+        with:
+          path: base
+          sparse-checkout: .github/gatekeep
+          persist-credentials: false
+
+      - name: Check out the pull request (data only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Verify the GateKeep evidence
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          case "$HEAD_REF" in
+            gatekeep/*) RUN_ID="${HEAD_REF#gatekeep/}" ;;
+            *) echo "FAIL: this pull request was not opened by GateKeep (branch $HEAD_REF)"; exit 1 ;;
+          esac
+          node base/.github/gatekeep/verify.js "pr/.gatekeep/evidence/${RUN_ID}.json" \
+            --public-key base/.github/gatekeep/gatekeep.pub.pem --tree pr

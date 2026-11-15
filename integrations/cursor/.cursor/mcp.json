@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "gatekeep": {
+      "command": "${env:GATEKEEP_HOME}/agents/.venv/bin/python",
+      "args": ["${env:GATEKEEP_HOME}/agents/app/mcp/server.py", "--transport", "stdio"],
+      "env": {
+        "PYTHONPATH": "${env:GATEKEEP_HOME}/agents",
+        "GATEKEEP_API": "http://localhost:4040",
+        "GATEKEEP_API_TOKEN": "${env:GATEKEEP_API_TOKEN}"
+      }
+    }
+  }
+}
