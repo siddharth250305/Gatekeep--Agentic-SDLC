@@ -100,8 +100,8 @@ test('seed loads 3 demo runs; RUN-0427 is awaiting with real chain', async () =>
   assert.equal(r.step, 'g3')
   assert.equal(r.totals.cost, '$0.42')
   assert.equal(r.totals.tokens, '18,420')
-  // run.created + 5 moves through the state machine
-  assert.equal(r.auditChain.length, 6)
+  // run.created + 5 moves through the state machine + the project policy read before the hand-over (I5)
+  assert.equal(r.auditChain.length, 7)
   assert.equal(r.verified, true)
 })
 

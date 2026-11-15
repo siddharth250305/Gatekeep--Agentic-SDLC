@@ -1,5 +1,5 @@
 // Test evidence for Gate 3 (B7): a code fingerprint and a test run on it.
-import { recordTestRun, robotAction } from '../../src/runs/service.js'
+import { recordPolicy, recordTestRun, robotAction } from '../../src/runs/service.js'
 
 export const FP = 'a'.repeat(64)
 export const OTHER_FP = 'b'.repeat(64)
@@ -15,8 +15,11 @@ export const PASSING = {
   missing_existing: [],
 }
 
-// The robot's usual Code step: a passing test run on FP, then request review on FP.
+// The robot's usual Code step: the project policy read (no gatekeep.yaml), a
+// passing test run on FP, then request review on FP.
 export async function handOver(db, runId, { agent = 'mcp', testRun = PASSING, fingerprint = FP } = {}) {
+  const policy = await recordPolicy(db, runId, { found: false }, { agent })
+  if (policy.error) throw new Error(`policy refused: ${policy.error}`)
   if (testRun) {
     const tr = await recordTestRun(db, runId, testRun, { agent })
     if (tr.error) throw new Error(`test run refused: ${tr.error}`)

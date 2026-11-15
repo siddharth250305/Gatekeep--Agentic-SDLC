@@ -31,6 +31,7 @@ async function setup() {
 // request_review is preceded by a passing test run and carries its fingerprint (B7).
 async function act(ctx, action) {
   if (action !== 'request_review') return ctx.call('POST', `/runs/RUN-H/actions/${action}`, ctx.agent, {})
+  await ctx.call('PUT', '/runs/RUN-H/policy', ctx.agent, { found: false }) // the project has no gatekeep.yaml (I5)
   await ctx.call('POST', '/runs/RUN-H/test-runs', ctx.agent, PASSING) // refused (409) when not at Code
   return ctx.call('POST', '/runs/RUN-H/actions/request_review', ctx.agent, { fingerprint: FP })
 }
@@ -350,12 +351,12 @@ test('artifacts can only be written for the robot step the run is at', async () 
   const ctx = await setup()
   const put = (body) => ctx.call('PUT', '/runs/RUN-H/artifacts', ctx.agent, body)
   try {
-    assert.equal((await put({ requirements: 'draft' })).status, 200) // at Requirements
+    assert.equal((await put({ requirements: 'REQ-1: draft' })).status, 200) // at Requirements (REQ IDs are checked at the hand-over, I3)
     assert.equal((await put({ diff: { file: 'x' } })).status, 409) // not the Code step
     await act(ctx, 'submit_requirements')
     // At Gate 1 the reviewer is reading the requirements: nobody may swap them.
     assert.equal((await put({ requirements: 'swapped' })).status, 409)
-    assert.equal((await getRun(ctx.db, 'RUN-H')).requirements, 'draft')
+    assert.equal((await getRun(ctx.db, 'RUN-H')).requirements, 'REQ-1: draft')
     await decide(ctx, ctx.planner, { decision: 'approve' })
     await act(ctx, 'submit_design')
     await decide(ctx, ctx.engineer, { decision: 'approve' })
@@ -395,6 +396,7 @@ test('a robot action can attach details to its one audit entry', async () => {
     await decide(ctx, ctx.planner, { decision: 'approve' })
     await act(ctx, 'submit_design')
     await decide(ctx, ctx.engineer, { decision: 'approve' })
+    await ctx.call('PUT', '/runs/RUN-H/policy', ctx.agent, { found: false })
     const before = (await getRun(ctx.db, 'RUN-H')).auditChain.length
     const res = await ctx.call('POST', '/runs/RUN-H/actions/request_review', ctx.agent, {
       fingerprint: FP, details: { summary: 'Added y.', files: ['app.py'] },

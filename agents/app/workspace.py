@@ -16,7 +16,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-WORKSPACES = Path(__file__).resolve().parent.parent / "workspaces"
+# Where run workspaces live. GATEKEEP_WORKSPACE_ROOT gives each deployment (or
+# a throwaway test stack) its own folder, so two databases with the same run
+# ids never share a workspace. Freeze markers live next to it (<root>/../.frozen).
+WORKSPACES = Path(os.environ.get("GATEKEEP_WORKSPACE_ROOT") or Path(__file__).resolve().parent.parent / "workspaces")
 
 _OWNER_REPO = re.compile(r"^[\w.-]+/[\w.-]+$")
 # Run ids become directory names under WORKSPACES, so they must never contain

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import {
   createRun, listRuns, getRun, recordPhaseMetrics, PhaseStateError, upsertTests, decideGate, cancelRun, robotAction,
   claimStart, releaseStart, writeStepArtifacts, upsertRepoContext, addComment, deleteComment, recordTestRun, SANDBOX_FIELDS,
+  recordPolicy,
 } from '../runs/service.js'
 import { actorName, requireAgent, requireAny, requireHuman } from '../auth/middleware.js'
 import { connectionRefused, pipelineHeaders, pipelineUrl } from '../runs/pipeline.js'
@@ -30,6 +31,24 @@ const REFUSALS = {
   untested: [409, () => 'Gate 3 cannot approve: no test run was recorded for this code'],
   code_changed: [409, () => 'Gate 3 cannot approve: the code changed after the last test run'],
   tests_not_passed: [409, () => 'Gate 3 cannot approve: the last test run on this code did not pass'],
+  // Milestone 6: structured hand-overs (I2, I3), the project policy (I5), team rules (I4).
+  requirements_ids_missing: [400, () => 'requirements must give each requirement an ID on its own line, e.g. "REQ-1: ..."'],
+  requirements_ids_duplicate: [400, (o) => `each requirement ID may be used once (repeated: ${(o.ids || []).join(', ')})`],
+  design_plan_missing: [400, () => 'the design must list the files it will change under a "## Files" heading, one per line: - `path` (create|modify) [REQ-1]'],
+  design_plan_bad_path: [400, (o) => `the design plans a file outside the workspace: ${o.path}`],
+  design_unknown_requirement: [400, (o) => `the design points at requirements that do not exist: ${(o.ids || []).join(', ')}`],
+  bad_policy: [400, () => 'a policy is { found: false } or { found: true, sha256, content | error }'],
+  policy_locked: [409, () => 'the project policy for this run was already recorded and cannot change'],
+  policy_invalid: [409, () => 'gatekeep.yaml is invalid; fix it in the project and start a new run (only cancel is possible)'],
+  policy_unknown: [409, () => "the code cannot be handed over before the project's gatekeep.yaml was read"],
+  forbidden_path_changed: [409, (o) => o.message],
+  over_file_budget: [409, (o) => o.message],
+  over_line_budget: [409, (o) => o.message],
+  undeclared_changes: [409, (o) => o.message],
+  requirements_not_covered: [409, (o) => o.message],
+  no_new_tests: [409, (o) => o.message],
+  already_approved: [409, () => 'you already approved this code; another reviewer must add the next approval'],
+  same_approver: [403, (o) => `you ${o.gate} of this run; gatekeep.yaml requires someone else to approve the code`],
 }
 
 function refuse(res, out) {
@@ -97,18 +116,21 @@ export function runsRouter(db, broadcast = () => {}) {
     res.json(await getRun(db, runId))
   }))
 
-  // Runs with a decision in flight in this process. The state machine already
-  // serializes decisions with a row lock; this also stops a second click from
-  // waiting behind a slow pipeline resume and then being forwarded too.
+  // Decisions in flight in this process, one per reviewer and run. The state
+  // machine already serializes decisions with a row lock; this also stops a
+  // second click from waiting behind a slow pipeline resume and then being
+  // forwarded too. Different reviewers may decide at the same moment (Gate 3
+  // may need several approvals, I4); the row lock puts them one after the other.
   const deciding = new Set()
 
-  async function oneAtATime(runId, res, fn) {
-    if (deciding.has(runId)) return res.status(409).json({ error: 'a decision for this run is already in progress' })
-    deciding.add(runId)
+  async function oneAtATime(runId, userId, res, fn) {
+    const key = `${runId}\u0000${userId}`
+    if (deciding.has(key)) return res.status(409).json({ error: 'a decision for this run is already in progress' })
+    deciding.add(key)
     try {
       await fn()
     } finally {
-      deciding.delete(runId)
+      deciding.delete(key)
     }
   }
 
@@ -141,13 +163,15 @@ export function runsRouter(db, broadcast = () => {}) {
     const { decision, target, gate, feedback } = req.body || {}
     if (decision !== 'approve' && decision !== 'reject') return res.status(400).json({ error: 'decision must be approve or reject' })
     if (gate !== undefined && gate !== null && typeof gate !== 'string') return res.status(400).json({ error: 'gate must be a step name' })
-    await oneAtATime(runId, res, async () => {
+    await oneAtATime(runId, req.principal.user.id, res, async () => {
       const { user } = req.principal
       const out = await decideGate(db, runId, {
         decision, target, feedback, user, expectedStep: typeof gate === 'string' && gate ? gate : undefined,
       })
       if (out.error) return refuse(res, out)
       touched(runId)
+      // An approval recorded while Gate 3 needs more (I4) moves nothing.
+      if (out.held) return res.json(out.run)
       const pipeline = await resumePipeline(runId, {
         decision, target: out.to, feedback: typeof feedback === 'string' ? feedback : '', actor: actorName(req.principal), gate: out.from,
       })
@@ -162,7 +186,7 @@ export function runsRouter(db, broadcast = () => {}) {
   r.post('/runs/:runId/cancel', requireHuman, wrap(async (req, res) => {
     const { runId } = req.params
     const { reason } = req.body || {}
-    await oneAtATime(runId, res, async () => {
+    await oneAtATime(runId, req.principal.user.id, res, async () => {
       const out = await cancelRun(db, runId, { user: req.principal.user, feedback: reason })
       if (out.error) return refuse(res, out)
       touched(runId)
@@ -181,6 +205,15 @@ export function runsRouter(db, broadcast = () => {}) {
     if (out.error) return refuse(res, out)
     if (!out.unchanged) touched(runId)
     res.json(out.run)
+  }))
+
+  // The project policy (gatekeep.yaml, I5), read by the agent service from the
+  // run's base commit. Recorded once; the same file again is a no-op.
+  r.put('/runs/:runId/policy', requireAgent, wrap(async (req, res) => {
+    const out = await recordPolicy(db, req.params.runId, req.body, { agent: req.principal.name })
+    if (out.error) return refuse(res, out)
+    if (!out.unchanged) touched(req.params.runId)
+    res.json(await getRun(db, req.params.runId))
   }))
 
   // Metrics only (cost, tokens, model, duration). Phase state, status and

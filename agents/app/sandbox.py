@@ -34,7 +34,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .diffing import _GIT_SAFE_CONFIG
-from .fingerprint import SKIP_DIRS
+from .fingerprint import skip_dir
 from .repository.security import is_sensitive_path, redact_secrets, resolve_inside
 
 IMAGE = os.getenv("SANDBOX_IMAGE", "gatekeep-sandbox")
@@ -127,7 +127,7 @@ def _sandbox_copy(src: str, dest: str) -> None:
         here = Path(dirpath)
         rel_dir = here.relative_to(root)
         dirnames[:] = [d for d in dirnames
-                       if d not in SKIP_DIRS and not (here / d).is_symlink()
+                       if not skip_dir(d, here == root) and not (here / d).is_symlink()
                        and not is_sensitive_path((rel_dir / d).as_posix())]
         out_dir = Path(dest) / rel_dir
         out_dir.mkdir(parents=True, exist_ok=True)
