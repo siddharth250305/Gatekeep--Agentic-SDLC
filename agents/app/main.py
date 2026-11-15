@@ -17,6 +17,7 @@ shared secret GATEKEEP_PIPELINE_SECRET after checking the reviewer's login.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -32,10 +33,11 @@ from .backend_auth import pipeline_secret_ok
 from .graph import build_pipeline
 from .llm import get_llm
 from .mcp.session import SessionManager
+from . import pr
 from .mcp.tools import BACKEND_ERRORS, GateKeepTools
 from .reporter import HttpReporter
 from .sandbox import SandboxRunner
-from .workspace import validate_run_id
+from .workspace import WORKSPACES, validate_run_id
 
 log = logging.getLogger("gatekeep.pipeline")
 
@@ -194,6 +196,19 @@ class StartBody(BaseModel):
     branch: str = ""
 
 
+class PullRequestBody(BaseModel):
+    title: str
+    body: str
+    evidence: dict
+    repo: str = ""
+    base: str = ""
+
+
+# Refusals that are about the run or its code (409); anything else is the
+# agent service failing to reach git or GitHub (502).
+PR_REFUSALS = frozenset({"no_github_repo", "no_token", "no_workspace", "bad_evidence", "code_changed", "commit_mismatch"})
+
+
 class ResumeBody(BaseModel):
     decision: str = ""  # already recorded by the backend; the step is read from it
     feedback: str = ""
@@ -224,3 +239,23 @@ async def resume(run_id: str, body: ResumeBody):
 @app.post("/pipeline/{run_id}/work", dependencies=[Depends(require_backend)])
 async def work(run_id: str):
     return _accepted(safe_run_id(run_id))
+
+
+@app.post("/pipeline/{run_id}/pull-request", dependencies=[Depends(require_backend)])
+async def pull_request(run_id: str, body: PullRequestBody):
+    """I6: push the approved code with its signed evidence and open the PR.
+    The backend decides (the run is done, a person asked); this service only
+    checks that the workspace is still the approved code and does the git work."""
+    run_id = safe_run_id(run_id)
+
+    def create() -> dict:
+        return pr.create_pull_request(
+            workspace=str(WORKSPACES / run_id), run_id=run_id, repo=body.repo, base=body.base or None,
+            title=body.title, body=body.body, evidence=body.evidence, token=os.getenv("GIT_TOKEN", ""),
+        )
+
+    try:
+        return await asyncio.to_thread(create)
+    except pr.PullRequestError as exc:
+        status = 409 if exc.code in PR_REFUSALS else 502
+        return JSONResponse({"error": str(exc), "reason": exc.code}, status_code=status)

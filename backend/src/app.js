@@ -2,6 +2,7 @@ import express from 'express'
 import { authenticate } from './auth/middleware.js'
 import { auditRouter } from './routes/audit.js'
 import { authRouter } from './routes/auth.js'
+import { evidenceRouter } from './routes/evidence.js'
 import { mcpRouter } from './routes/mcp.js'
 import { runsRouter } from './routes/runs.js'
 import { wsTickets } from './auth/tickets.js'
@@ -47,6 +48,7 @@ export function createApp(db, broadcast = () => {}, {
   app.use('/', runsRouter(db, broadcast))
   app.use('/', auditRouter(db, broadcast, { demoMode }))
   app.use('/', mcpRouter(db, broadcast))
+  app.use('/', evidenceRouter(db, broadcast))
 
   // Central error handler.
   // eslint-disable-next-line no-unused-vars
