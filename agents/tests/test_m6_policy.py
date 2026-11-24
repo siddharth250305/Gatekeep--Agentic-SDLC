@@ -269,6 +269,42 @@ def test_a_shortcut_into_gatekeep_is_refused(node, core):
     assert not (ws / ".gatekeep" / "payload.py").exists()
 
 
+@pytest.mark.parametrize("tool", ["read_file", "write_file", "apply_patch"])
+def test_a_shortcut_out_of_the_workspace_is_refused_and_audited(node, core, tmp_path, tool):
+    # Golden run: reading such a shortcut crashed the MCP tool call
+    # ("Error executing tool") instead of a refusal in the audit chain.
+    sid = code_run(node, core, None)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    outside.write_text("OUTSIDE-SECRET\n")
+    (core.workspaces / "RUN-P" / "link").symlink_to(outside)
+    args = {"read_file": {}, "write_file": {"content": "evil\n"},
+            "apply_patch": {"find": "OUTSIDE", "replace": "EVIL"}}[tool]
+    out = core.call(sid, tool, path="link", **args)
+    assert isinstance(out, dict) and "escapes the workspace" in out["error"]
+    assert outside.name not in json.dumps(out)  # the target is never named
+    assert outside.read_text() == "OUTSIDE-SECRET\n"
+    events = node.events("RUN-P")
+    assert events.count("mcp.policy.denied") == 1
+    assert "mcp.file.written" not in events and "mcp.file.patched" not in events
+
+
+def test_a_shortcut_to_a_secret_file_is_refused_with_the_real_reason(node, core):
+    sid = code_run(node, core, None)
+    ws = core.workspaces / "RUN-P"
+    (ws / ".env").write_text("API_KEY=supersecret123\n")
+    (ws / "cfg").symlink_to(".env")
+    out = core.call(sid, "read_file", path="cfg")
+    assert "sensitive" in out["error"] and "supersecret" not in json.dumps(out)
+    assert node.events("RUN-P").count("mcp.policy.denied") == 1
+
+
+def test_a_shortcut_inside_the_workspace_can_still_be_read(node, core):
+    sid = code_run(node, core, None)
+    (core.workspaces / "RUN-P" / "alias.py").symlink_to("app.py")
+    assert core.call(sid, "read_file", path="alias.py") == "x = 1\n"
+    assert "mcp.policy.denied" not in node.events("RUN-P")
+
+
 @pytest.mark.parametrize("path", ["app\nx.py", "a\rb.py", "a\x00b.py", "app/\x1b[31m.py"])
 def test_control_characters_in_paths_are_refused(node, core, path):
     sid = code_run(node, core, None)

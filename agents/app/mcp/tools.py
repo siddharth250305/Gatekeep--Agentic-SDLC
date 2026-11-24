@@ -204,8 +204,8 @@ class GateKeepTools:
             run, denial = self._ensure_policy(session, run, tool)
         if denial is None:
             denial = self.policy.project_denial(run, tool, path=path, write=write)
-        if denial is None and write and path is not None:
-            denial = self._real_path_denial(session, run, tool, path)
+        if denial is None and path is not None:
+            denial = self._real_path_denial(session, run, tool, path, write)
         if denial is None:
             impl = getattr(self, f"_tool_{tool}", None)
             if impl is None:
@@ -221,22 +221,24 @@ class GateKeepTools:
         return denial
 
     def _real_path_denial(self, session: McpSession, run: dict[str, Any], tool: str,
-                          path: str) -> dict[str, Any] | None:
+                          path: str, write: bool) -> dict[str, Any] | None:
         """The same file rules for the real file behind *path* after every
-        shortcut is followed, so a shortcut cannot lead a write into a
-        protected folder (ECC review). A path that leaves the workspace is
-        refused by the tool itself."""
+        shortcut is followed, so a shortcut cannot lead a read or write into a
+        protected folder (ECC review), and a path that leaves the workspace is
+        an audited refusal rather than a failed tool call (golden run)."""
         root = Path(self._workspace_path(session)).resolve()
+        if not root.is_dir():
+            return None  # no workspace yet: the tool answers that itself
         try:
             real = WorkspaceTools(str(root))._safe(path).relative_to(root).as_posix()
-        except ValueError:
-            return None
+        except ValueError as exc:  # outside the workspace, .git or a secret file; names no target
+            return {"error": f"'{path}' is refused: {exc}", "path": path, "tool": tool}
         if real == Path(path).as_posix():
             return None
-        result = self.policy.check_file_access(real, write=True)
+        result = self.policy.check_file_access(real, write=write)
         if not result.allowed:
             return {"error": f"{result.reason} (via the shortcut '{path}')", "path": path, "tool": tool}
-        return self.policy.project_denial(run, tool, path=real, write=True)
+        return self.policy.project_denial(run, tool, path=real, write=write)
 
     def _ensure_policy(self, session: McpSession, run: dict[str, Any],
                        tool: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
