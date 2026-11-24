@@ -1,0 +1,260 @@
+{
+ "meta": {
+  "k": 10,
+  "seed": 0,
+  "max_per_repo": 40,
+  "bootstrap_resamples": 1000,
+  "min_words": 5,
+  "max_source_files": 10,
+  "heads": {
+   "gatekeeper": "202157af784a83a4cb78405bd5b4db3c00c9f570",
+   "carbon-lens": "113c5a4476cb237d89b70cb6d1a15db0676b7bd7",
+   "machine_learning": "ca3d414a410394f9b3e900a87c089ee3b41ead97"
+  },
+  "skipped_repos": {}
+ },
+ "funnels": {
+  "gatekeeper": {
+   "non_merge": 45,
+   "root_commit": 1,
+   "short_message": 1,
+   "no_source_change": 9,
+   "too_many_source_files": 10,
+   "only_added_sources": 5,
+   "eligible": 19,
+   "sampled": 19
+  },
+  "carbon-lens": {
+   "non_merge": 3,
+   "root_commit": 1,
+   "short_message": 1,
+   "no_source_change": 0,
+   "too_many_source_files": 0,
+   "only_added_sources": 0,
+   "eligible": 1,
+   "sampled": 1
+  },
+  "machine_learning": {
+   "non_merge": 30,
+   "root_commit": 1,
+   "short_message": 0,
+   "no_source_change": 4,
+   "too_many_source_files": 5,
+   "only_added_sources": 5,
+   "eligible": 15,
+   "sampled": 15
+  }
+ },
+ "commits": [
+  {
+   "repo": "gatekeeper",
+   "sha": "c56d97bb22d58bb2a231b2a2245067237c784678",
+   "parent": "43fdb2618c955a72aa354d4527ab9f50d01b7771",
+   "message": "feat(ui): F5 part 2 Gate 3 traceability, drift table, and policy panel"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "6605b31eb5e975d5521bf6e38bce07d82a0b8988",
+   "parent": "e3e0e8da4550d30e4ebbe313fdb7d80fbea6d515",
+   "message": "feat(evidence): I6 Ed25519 signed evidence bundle, offline verifier, and PR export"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "e3e0e8da4550d30e4ebbe313fdb7d80fbea6d515",
+   "parent": "e01c1882015db79a77530cd00b40a5acfbd0a563",
+   "message": "feat(gate3): I4 multi-reviewer team approvals and separation of duties"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "e01c1882015db79a77530cd00b40a5acfbd0a563",
+   "parent": "7f1cb30dec1fe773aab53f4b988c7b83617f0d84",
+   "message": "feat(trace): I2 I3 structured requirements, design drift, and test coverage"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "2b93bb0d5ffeadadc9bd817daf8fb9687a8edade",
+   "parent": "ddda8f5b612f90025f3a5c281bfd8a626a71b140",
+   "message": "feat(backend): G9 pipeline recovery on startup"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "e1ce20c123e2e132c834ae4f8c00575fcf3df11e",
+   "parent": "6a6509dc2cd2fe1a713a46041ed85afea3ab49c3",
+   "message": "fix(agents): G7 G8 safe apply_patch and session lifecycle"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "2aaef09f841f059d3f889f99432aac7262f26a16",
+   "parent": "87e62f2ee47b73a168ac3c3fd0b5b3bef240f54d",
+   "message": "feat(ui): F8 F7 F5 part 1 resilient live updates, accessibility, and Gate 3 three-column layout"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "87e62f2ee47b73a168ac3c3fd0b5b3bef240f54d",
+   "parent": "ae382360241e99f211a439d0529fc8c1e65a3813",
+   "message": "feat(ui): F4 F6 unified gate banner and scoped rework"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "e50d5d3fd55442a7294fd7caf62a232c79680839",
+   "parent": "dbf17010bffb212f30f48f7057288b0f3628b330",
+   "message": "test(agents): clean up workspace freeze marker file in context tests"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "8e5372e0cf947a5a149f59418148ed455c752c4f",
+   "parent": "03162ff1eeb6fd5e596ede7d7e8f7e2fe49de2c9",
+   "message": "feat(audit): E4, E1 HMAC audit chain with external secret, run ID binding, and head anchor"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "03162ff1eeb6fd5e596ede7d7e8f7e2fe49de2c9",
+   "parent": "172577362753d6212ba3f916e649f7c374572ffd",
+   "message": "feat(sandbox): C2, C3 parse JUnit XML results, run existing tests, mark new tests"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "172577362753d6212ba3f916e649f7c374572ffd",
+   "parent": "716782b9afba186c1fa83c11ac9027fe8db9715a",
+   "message": "feat(policy): D2, D3, D8 symlink blocking, secret stripping before Docker, and egress redaction"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "b377da9a2faf4b0c4b739d5d969cf2edcab1c440",
+   "parent": "69cdc9c9c207ca55d7cdf73448cae1e2e8faa8d3",
+   "message": "fix(audit): E2 server-only audit diary writes"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "d0c086cb7c8b02daf162decc9de7b5cb28f4fc1d",
+   "parent": "208e4c434f3d33f2e51d6288cb540c5e0467bb85",
+   "message": "feat(state): B2, B3, B4, B5, B8 (machine, service, Gate 3, rework loop)"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "ae8ce0f40dd27972fd3ce468baa0db1773d6787b",
+   "parent": "96b25f00358018d15790c3ebde9a113e5f587968",
+   "message": "feat(ui): A1 add login screen, session persistence and vitest suite"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "389996408f7d8555c86abfc81095dab37609cd44",
+   "parent": "bcf7beaf77c5f4a2bdc33bfe60ff110672ca5d37",
+   "message": "refactor(common): G3 unify diff parsing and D5 single sensitive file block list"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "4f654d6042c5058704d73f4a5bd3f97c08a36a09",
+   "parent": "daf947952490df904498e2ba0b25660a6db842e8",
+   "message": "feat(mcp): wire phase permission introspection into get_agent_context and remove unused manifest"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "daf947952490df904498e2ba0b25660a6db842e8",
+   "parent": "228bc5c72824e93acf0d35c62f53ffa8fffae4e0",
+   "message": "test(mcp): add unit tests for policy permission partitioning and manifest validation"
+  },
+  {
+   "repo": "gatekeeper",
+   "sha": "228bc5c72824e93acf0d35c62f53ffa8fffae4e0",
+   "parent": "abfb729912d4b1e6e6bbc7cdbff522d2b37c9ec4",
+   "message": "feat(mcp): add policy engine phase permission introspection and security manifest"
+  },
+  {
+   "repo": "carbon-lens",
+   "sha": "113c5a4476cb237d89b70cb6d1a15db0676b7bd7",
+   "parent": "74fbd9008b6e860368b3d6ab139f4f6c853a4fbc",
+   "message": "Add Gemini-style chat dashboard with Gatekeep dark theme and conversational auditor"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "fc550b8251ec2fd7b4c6de1689a1dda83c90f694",
+   "parent": "7a645e17380e729bc17126f81fddbf4e56319ca9",
+   "message": "feat(routing): the policy comparison records the share the hard rules alone send to second review"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "7a645e17380e729bc17126f81fddbf4e56319ca9",
+   "parent": "944edc31d4562762cd804d6144472621e3fff075",
+   "message": "feat(routing): fit the learned policy on val and compare it with the threshold policy\n\ncompare.py routes the test split with both policies through the same ReviewRouter and\nproviders, one decision log each, and writes policy_comparison.json and .md: modes, error\nrate per mode, error catch rate, ice handling and routing time, with paired bootstrap 95%\nintervals for the differences, under equal workload and equal catch rate (both chosen on\nval). make compare-policies and compare-policies-cnn run fit + compare."
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "944edc31d4562762cd804d6144472621e3fff075",
+   "parent": "4be0b09b6f4b7576ac4381026f7a7f6a56c7c521",
+   "message": "feat(routing): learned review policy, fitted on val, weights hashed into its version\n\nChange scenario (b): replace the decision policy. LearnedPolicy (routing/learned.py) keeps the\nhard safety rules, then a NumPy logistic regression on confidence, margin and agreement\npredicts the risk that the primary model is wrong; two cutoffs chosen on val (equal\nworkload with the threshold policy) pick the mode. Registered as 'learned' in POLICIES;\nthe default policy stays threshold and --bundle-dir refuses any other. router.py, the\nProtocols and log.py are unchanged."
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "4be0b09b6f4b7576ac4381026f7a7f6a56c7c521",
+   "parent": "e7b97e93b72da15687c6a041720516ce86a9afa8",
+   "message": "feat(routing): margin provider, switched on by name in routing.extra_providers\n\nChange scenario (a): a third confidence provider. MarginProvider is the gap between the\ntop-1 and top-2 temperature-scaled probabilities; run.PROVIDERS registers it so config can\nenable it. router.py, the Protocols and log.py are unchanged."
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "568ef26876aeb7a9d31e39fe52914b009edf5eb7",
+   "parent": "daea6c93f0fb284dcb24bdfd3e4cfeec6bbfc35e",
+   "message": "fix(frontend): the review queue intro names every mode"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "daea6c93f0fb284dcb24bdfd3e4cfeec6bbfc35e",
+   "parent": "4db9f98fdf7390fbfc214de350842c941b29bdde",
+   "message": "test(routing): the offline check command writes routing.json for the bundle"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "4db9f98fdf7390fbfc214de350842c941b29bdde",
+   "parent": "080be1c60522e7540d494ead444e0a5478cc2d85",
+   "message": "feat(frontend): review note on the report and a reviewer queue at #/review"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "080be1c60522e7540d494ead444e0a5478cc2d85",
+   "parent": "7d6524c234c419568a8a810b5818ed60e32b4ecc",
+   "message": "feat(routing): return the review rule's confidence with each decision"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "6ed568b90026ef4dd58d53669b2b66f79335a850",
+   "parent": "e9505b39b7b8d3af4d42c4907baecaf5ef5cd56f",
+   "message": "feat(routing): review report on the live log, compared with the offline check"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "e9505b39b7b8d3af4d42c4907baecaf5ef5cd56f",
+   "parent": "fb40163386eb2ec88c1b7fc5e476fdc3abb71b1f",
+   "message": "feat(api): review decision on /predict, reviewer queue and review endpoints"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "fb40163386eb2ec88c1b7fc5e476fdc3abb71b1f",
+   "parent": "fdda3b2f20c3519fdb89bafdc14be246c7ade3be",
+   "message": "feat(routing): routing.json from the offline check, live routing with reviews"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "fdda3b2f20c3519fdb89bafdc14be246c7ade3be",
+   "parent": "ddf36c0ac2c4edacb84b4b122220ee24f0fe2caa",
+   "message": "feat(routing): thread-safe decision log and a reader that keeps every outcome"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "46758278e16d93661b651afef11b520e537cc993",
+   "parent": "ad66e9e3ba972f06f352343d07d020df263a9be5",
+   "message": "fix(routing): name the primary model first in the run label"
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "d9a770bb612199d97592f88d38d200ddfbe2fbee",
+   "parent": "514d088f155795f6fa917a7363a1da7fa420fd9c",
+   "message": "feat(routing): review router core with providers, threshold policy and audit log\n\nCase/CaseView (providers and policies never see true_label), calibrated\nconfidence and model-agreement providers behind a ConfidenceProvider\nprotocol, ThresholdPolicy behind ReviewPolicy (light/full/second review, no\nauto-accept), ReviewRouter with fallbacks that can only make review\nstricter, and an append-only JSONL DecisionLog with outcome events.\nStandard library and NumPy only."
+  },
+  {
+   "repo": "machine_learning",
+   "sha": "514d088f155795f6fa917a7363a1da7fa420fd9c",
+   "parent": "36cd673fc6c0b2fd1d641a0fb1664442bbb8aa9f",
+   "message": "feat(baseline): opt-in --save-probs for first-seed val/test probabilities\n\nAdds roadcond.routing.probs, a plain-array .npz format for per-model class\nprobabilities (image ids, true labels, classes, seed), and lets the classical\nbaseline save predict_proba of each chosen first-seed model on val and test.\nOff by default and requires --eval-test; baseline.json is unchanged."
+  }
+ ]
+}
